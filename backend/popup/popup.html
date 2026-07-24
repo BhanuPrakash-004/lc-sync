@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LC Sync</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────── -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFA116" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+      </div>
+      <span class="logo-text">LC <span class="accent">Sync</span></span>
+    </div>
+    <div class="header-right">
+      <div id="statusDot" class="status-dot status-unknown" title="Checking connection…"></div>
+    </div>
+  </header>
+
+  <!-- ── Connection Banner ──────────────────────── -->
+  <div id="connectionBanner" class="connection-banner banner-loading">
+    <div class="banner-inner">
+      <span class="banner-dot"></span>
+      <span id="connectionText">Checking Supabase connection…</span>
+    </div>
+  </div>
+
+  <!-- ── Stats Row ──────────────────────────────── -->
+  <section class="stats-row">
+    <div class="stat-card">
+      <div id="submissionCount" class="stat-value">—</div>
+      <div class="stat-label">Solutions Synced</div>
+    </div>
+    <div class="stat-divider"></div>
+    <div class="stat-card">
+      <div id="activeStatus" class="stat-value">
+        <span class="active-badge">
+          <span class="active-dot"></span>
+          Active
+        </span>
+      </div>
+      <div class="stat-label">Extension Status</div>
+    </div>
+  </section>
+
+  <!-- ── Recent Submissions ─────────────────────── -->
+  <section class="section">
+    <div class="section-header">
+      <div class="section-title-group">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="section-icon">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <h3 class="section-title">Recent Submissions</h3>
+      </div>
+      <button id="refreshBtn" class="icon-btn" title="Refresh">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="submissionsList" class="submissions-list">
+      <div class="placeholder">
+        <div class="placeholder-spinner"></div>
+        Loading…
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Action Buttons ─────────────────────────── -->
+  <section class="actions">
+    <button id="openDashboard" class="btn btn-primary">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+      </svg>
+      View Dashboard
+    </button>
+    <button id="openOptions" class="btn btn-secondary">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/>
+      </svg>
+      Settings
+    </button>
+  </section>
+
+  <!-- ── Footer ─────────────────────────────────── -->
+  <footer class="footer">
+    <span>Solve · Save · Remember</span>
+    <a id="versionText" href="#" class="footer-link">v1.0.0</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

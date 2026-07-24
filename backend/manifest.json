@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "LC Sync",
+  "version": "1.0.0",
+  "description": "Save your LeetCode solutions, descriptions, images and notes to your own Supabase database",
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "contextMenus"
+  ],
+
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "https://*.supabase.co/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://leetcode.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "LC Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "options_page": "options/options.html",
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup/popup.html",
+        "popup/popup.css",
+        "popup/popup.js",
+        "options/options.html",
+        "options/guide.html",
+        "options/guide.js",
+        "options/options.css",
+        "options/options.js",
+        "icons/*.png",
+        "icons/*.svg",
+        "inject.js"
+      ],
+      "matches": ["https://leetcode.com/*"]
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-white/[0.08];
+  }
+
+  html {
+    @apply bg-dark-900 text-white scroll-smooth;
+  }
+
+  body {
+    @apply font-sans antialiased bg-dark-900 text-white min-h-screen;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-1.5 h-1.5;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-dark-800;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-dark-500 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-dark-400;
+  }
+
+  /* ── Browser autofill override ─────────────────────────────────────────
+     Chrome/Edge inject a solid white or yellow background on autofilled
+     inputs. The only reliable fix is a large inset box-shadow that paints
+     over the UA background, plus -webkit-text-fill-color to keep text white.
+  */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 9999px #18181b inset !important;
+    box-shadow: 0 0 0 9999px #18181b inset !important;
+    -webkit-text-fill-color: #ffffff !important;
+    caret-color: #ffffff;
+    border-color: inherit;
+    transition: background-color 99999s ease-in-out 0s;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed select-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand-orange text-dark-900 hover:bg-brand-orange-dark active:scale-95 shadow-orange-sm hover:shadow-orange;
+  }
+
+  .btn-secondary {
+    @apply btn bg-dark-700 text-white hover:bg-dark-600 active:scale-95 border border-white/10;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-white/70 hover:bg-dark-700 hover:text-white active:scale-95;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger/20 text-danger hover:bg-danger/30 border border-danger/30 active:scale-95;
+  }
+
+  .card {
+    @apply bg-dark-800 rounded-xl border border-white/[0.08] shadow-card hover:shadow-card-hover transition-all duration-300;
+  }
+
+  .card-hover {
+    @apply card hover:border-brand-orange/30 hover:bg-gradient-to-br hover:from-brand-orange/5 hover:to-transparent;
+  }
+
+  .input {
+    @apply w-full bg-dark-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-brand-orange/60 focus:ring-1 focus:ring-brand-orange/30 transition-all duration-200;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-easy {
+    @apply badge bg-success/20 text-success border border-success/30;
+  }
+
+  .badge-medium {
+    @apply badge bg-warning/20 text-warning border border-warning/30;
+  }
+
+  .badge-hard {
+    @apply badge bg-danger/20 text-danger border border-danger/30;
+  }
+
+  .badge-tag {
+    @apply badge bg-dark-600 text-white/60 border border-white/10 hover:border-brand-orange/40 hover:text-brand-orange transition-colors cursor-pointer;
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-white/60 hover:text-white hover:bg-dark-700 transition-all duration-200 cursor-pointer;
+  }
+
+  .sidebar-item-active {
+    @apply sidebar-item bg-brand-orange/10 text-brand-orange hover:bg-brand-orange/15 hover:text-brand-orange border border-brand-orange/20;
+  }
+
+  .skeleton {
+    @apply bg-dark-700 rounded animate-shimmer bg-shimmer-gradient bg-[length:200%_100%];
+  }
+
+  .code-block {
+    @apply font-mono text-sm bg-dark-900 rounded-lg p-4 border border-white/[0.06] overflow-x-auto;
+  }
+
+  .stat-card {
+    @apply card p-5 flex flex-col gap-2;
+  }
+
+  .glass {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-r from-brand-orange to-brand-orange-light bg-clip-text text-transparent;
+  }
+
+  .glow-orange {
+    filter: drop-shadow(0 0 8px rgba(255, 161, 22, 0.5));
+  }
+
+  .animate-in {
+    @apply animate-fade-in;
+  }
+}
