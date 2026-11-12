@@ -76,7 +76,7 @@ function normalizeDescriptionImageUrls(description) {
 /**
  * Locate an existing submission for a problem by ID, slug, or title matching the target language.
  */
-async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, language, problemSlug, problemTitle) {
+async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, language, problemSlug, problemTitle, reportErrors = false) {
   // ── 1. Match by problem_id (primary key lookup) ────────────────────────────
   if (problemId && problemId !== 0) {
     const endpoint =
@@ -91,8 +91,8 @@ async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, langu
       if (response.ok) {
         const rows = await response.json();
         if (rows.length > 0) return rows[0];
-      }
-    } catch { /* fall through */ }
+      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
+    } catch (error) { if (reportErrors) throw error; }
   }
 
   // ── 2. Match by problem_slug + language (fallback for unnumbered problems) ─
@@ -109,8 +109,8 @@ async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, langu
       if (response.ok) {
         const rows = await response.json();
         if (rows.length > 0) return rows[0];
-      }
-    } catch { /* fall through */ }
+      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
+    } catch (error) { if (reportErrors) throw error; }
   }
 
   // ── 3. Match by problem_title + language (last resort fallback) ────────────
@@ -127,11 +127,34 @@ async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, langu
       if (response.ok) {
         const rows = await response.json();
         if (rows.length > 0) return rows[0];
-      }
-    } catch { /* fall through */ }
+      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
+    } catch (error) { if (reportErrors) throw error; }
   }
 
   return null;
+}
+
+/** Use the same comparison before the popup and before writing a solution. */
+function duplicateSolutionKind(existing, code) {
+  if (!existing || typeof code !== 'string' || !code.trim()) return null;
+  const submitted = code.trim();
+  if (typeof existing.code === 'string' && existing.code.trim() === submitted) return 'primary';
+  const alternates = Array.isArray(existing.alternate_codes) ? existing.alternate_codes : [];
+  return alternates.some(alt => typeof alt?.code === 'string' && alt.code.trim() === submitted)
+    ? 'alternate' : null;
+}
+
+/** Read-only check: an identical saved solution does not need the save modal. */
+async function checkSubmissionDuplicate(data = {}) {
+  if (typeof data.code !== 'string' || !data.code.trim()) return { success: false, duplicate: false };
+  const { supabaseUrl, supabaseKey } = await getCredentials();
+  if (!supabaseUrl || !supabaseKey) return { success: false, duplicate: false };
+  const existing = await findExistingSubmission(
+    supabaseUrl, supabaseKey, parseInt(data.problemNumber, 10) || 0,
+    data.language || 'Unknown', data.problemSlug, data.problemTitle, true
+  );
+  const match = duplicateSolutionKind(existing, data.code);
+  return { success: true, duplicate: Boolean(match), match };
 }
 
 /**
@@ -245,8 +268,9 @@ async function saveSubmission(data) {
     const shouldBackfillProblemId = Boolean(problemId && !existing.problem_id);
     const endpoint = `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}?id=eq.${existing.id}`;
 
+    const duplicateKind = duplicateSolutionKind(existing, newCode);
     // Skip duplicate if primary solution code is identical
-    if (existing.code && existing.code.trim() === newCode.trim()) {
+    if (duplicateKind === 'primary') {
       if (shouldBackfillDescription || shouldBackfillProblemId) {
         const patchBody = {};
         if (shouldBackfillDescription) patchBody.description = description;
@@ -266,10 +290,7 @@ async function saveSubmission(data) {
 
     // Skip duplicate if alternate approach code is identical
     const alternates = Array.isArray(existing.alternate_codes) ? existing.alternate_codes : [];
-    const isDuplicateAlternate = alternates.some(
-      (alt) => alt.code && alt.code.trim() === newCode.trim()
-    );
-    if (isDuplicateAlternate) {
+    if (duplicateKind === 'alternate') {
       return { success: true, data: existing, skipped: true, reason: 'Identical alternate code already saved.' };
     }
 
@@ -289,10 +310,11 @@ async function saveSubmission(data) {
 
     // Build update payload
     const patchBody = { alternate_codes: updatedAlternates };
-    if (data.userTopic    != null) patchBody.user_topic    = data.userTopic;
-    if (data.userSubtopic != null) patchBody.user_subtopic = data.userSubtopic;
-    if (data.subtopic     != null) patchBody.subtopic      = data.subtopic;
-    else if (data.userSubtopic != null) patchBody.subtopic = data.userSubtopic;
+    // An explicit null means the user cleared a prefilled selection.
+    if (Object.hasOwn(data, 'userTopic')) patchBody.user_topic = data.userTopic;
+    if (Object.hasOwn(data, 'userSubtopic')) patchBody.user_subtopic = data.userSubtopic;
+    if (Object.hasOwn(data, 'subtopic')) patchBody.subtopic = data.subtopic;
+    else if (Object.hasOwn(data, 'userSubtopic')) patchBody.subtopic = data.userSubtopic;
 
     if (shouldBackfillDescription) patchBody.description = description;
     if (shouldBackfillProblemId) patchBody.problem_id = problemId;
@@ -452,8 +474,49 @@ async function fetchRecentSubmissions(limit = 5) {
 }
 
 /**
- * Fetch custom topics and subtopics list from Supabase.
+ * Fetch the saved categorization for the problem shown in the save modal.
  */
+async function fetchSubmissionCategorization(data = {}) {
+  const { supabaseUrl, supabaseKey } = await getCredentials();
+  if (!supabaseUrl || !supabaseKey) return { success: false, error: 'Not configured' };
+
+  const problemId = parseInt(data.problemNumber, 10) || 0;
+  const matches = [];
+  if (problemId) matches.push(['problem_id', problemId]);
+  if (data.problemSlug) matches.push(['problem_slug', data.problemSlug]);
+  if (data.problemTitle && data.problemTitle !== 'Unknown Problem') {
+    matches.push(['problem_title', data.problemTitle]);
+  }
+
+  try {
+    for (const [column, value] of matches) {
+      const endpoint = `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
+        `?${column}=eq.${encodeURIComponent(value)}` +
+        '&select=user_topic,user_subtopic,subtopic,language&order=created_at.desc';
+      const response = await fetch(endpoint, { method: 'GET', headers: buildHeaders(supabaseKey) });
+      if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
+      const rows = await response.json();
+      if (!rows.length) continue;
+
+      // Prefer the record this language will update, then reuse the problem's
+      // most recent categorization even when solving it in another language.
+      const saved = rows.find(row => row.language === data.language && row.user_topic) ||
+        rows.find(row => row.user_topic) || rows[0];
+      return {
+        success: true,
+        categorization: {
+          topic: saved.user_topic || null,
+          subtopic: saved.subtopic ?? saved.user_subtopic ?? null,
+        },
+      };
+    }
+    return { success: true, categorization: null };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/** Fetch the available topics and subtopics. */
 async function fetchTopicsFromDB() {
   const { supabaseUrl, supabaseKey } = await getCredentials();
   if (!supabaseUrl || !supabaseKey) {
@@ -669,10 +732,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return true;
     }
 
+    case 'CHECK_SUBMISSION_DUPLICATE':
+      checkSubmissionDuplicate(message.payload)
+        .then(sendResponse)
+        .catch(() => sendResponse({ success: false, duplicate: false }));
+      return true;
+
     case 'FETCH_TOPICS':
       fetchTopicsFromDB()
         .then(sendResponse)
         .catch((err) => sendResponse({ success: false, topics: [], subtopics: [], error: err.message }));
+      return true;
+
+    case 'FETCH_SUBMISSION_CATEGORIZATION':
+      fetchSubmissionCategorization(message.payload)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
 
     case 'CREATE_TOPIC':

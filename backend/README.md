@@ -43,6 +43,20 @@ For complete step-by-step instructions, see **[SETUP.md — Part 3](../SETUP.md#
    - You can categorize the problem under a **Topic** & **Subtopic**, write notes, attach ChatGPT or YouTube links, and click **Save**.
 4. If you solve the same problem again later, LC Sync automatically saves the new solution as an **Alternate Approach** without overwriting your original.
 
+For an existing problem, the modal preselects its saved **Topic** and **Subtopic**. Keep these selections or change them before saving your next approach. Saved custom categories remain selectable even if they are missing from the topic list. New problems start with blank selections.
+
+Version **1.0.1** checks for identical code before opening the modal. If the same problem and language already has that code as its primary solution or an alternate approach, no popup is shown. The comparison ignores surrounding whitespace, matching the backend's save check. If the lookup fails or takes more than five seconds, the popup remains available and the backend still checks for duplicates when saving.
+
+The save modal only opens for a completed, accepted result tied to a new **Submit** request. **Run**, partial passes, failed submissions, and viewing old accepted submissions do not trigger it. If test counts are provided, all tests must have passed.
+
+After updating the extension files, click **Reload** for LC Sync in `chrome://extensions`, then refresh your LeetCode tab.
+
+Version **1.0.3** supports GraphQL `submissionDetails.statusCode`, including results without `statusDisplay`, and decodes text, JSON, Blob, and ArrayBuffer XHR responses. To diagnose a missing popup, open the LeetCode tab's DevTools **Console**, filter for `LC Sync`, and submit once. The logs show the detected submission ID, response format, GraphQL operation/result fields, verdict, and popup display, without logging submitted code or credentials.
+
+Version **1.0.4** adds numbered `[STEP n]` diagnostics: 1–2 Submit and ID, 3–4 decoded and matched result, 5 raw verdict fields, 6 acceptance/test-count decision, 7–8 message delivery, 9 scheduled popup, 10 metadata and construction, 11 popup attached, and 12 topic loading and Save readiness. `WAIT`, `STOP`, and `ERROR` lines explain why progress stops. A non-accepted initial result remains tracked for subsequent updates for that same Submit; Run or a new Submit cancels that tracking.
+
+Run the extension regression tests from the repository root with `node --test backend/submission-detection.test.cjs backend/categorization.test.cjs` (Node.js 18 or later).
+
 ---
 
 ## File Structure
@@ -72,12 +86,12 @@ backend/
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
+| Problem                                          | Solution                                                                                                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
 | **"Connection Failed"** when testing credentials | Ensure Project URL starts with `https://` and no trailing `/`. Use the `anon public` key, not `service_role`. Re-run the SQL schema. |
-| **Sync popup doesn't appear** after submitting | Reload the LeetCode tab (`Ctrl+R`) after installing the extension. Check it's enabled in `chrome://extensions`. |
-| **Where is my data stored?** | Strictly inside your personal Supabase database. No data goes to any 3rd-party servers. |
+| **Sync popup doesn't appear** after submitting   | Reload the LeetCode tab (`Ctrl+R`) after installing the extension. Check it's enabled in `chrome://extensions`.                      |
+| **Where is my data stored?**                     | Strictly inside your personal Supabase database. No data goes to any 3rd-party servers.                                              |
 
 ---
 
-*For full setup guide, see [SETUP.md](../SETUP.md). For schema reference, see [supabase/schema.sql](../supabase/schema.sql).*
+_For full setup guide, see [SETUP.md](../SETUP.md). For schema reference, see [supabase/schema.sql](../supabase/schema.sql)._

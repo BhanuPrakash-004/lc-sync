@@ -19,6 +19,11 @@
   // ─────────────────────────────────────────────
   let lastSubmissionData = null; // Most recent successful submission payload
   let modalOpen = false;
+  const handledSubmissionIds = new Set();
+
+  function tracePopup(step, event, details = {}) {
+    console.log(`[LC Sync][STEP ${step}] ${event} ${JSON.stringify(details)}`);
+  }
 
   // ─────────────────────────────────────────────
   // Utility helpers
@@ -400,7 +405,7 @@
     if (event.source !== window) return;
     
     if (event.data && event.data.type === 'LC_SYNC_SUBMISSION_DETECTED') {
-      console.log('[LC Sync Content] Submission detected message received from inject.js');
+      tracePopup(8, 'Content script received acceptance message', { id: event.data.data?._verified_submission_id ?? null });
       handleSubmissionResponse(event.data.data);
     }
   });
@@ -410,43 +415,85 @@
   // This guarantees window.fetch is intercepted before any page code runs.
   // No dynamic <script> injection needed here.
 
+  function checkDuplicateBeforePopup(payload) {
+    return new Promise((resolve) => {
+      // A slow or unavailable database must not permanently hide the save UI.
+      const timeout = setTimeout(() => resolve({ success: false, duplicate: false }), 5000);
+      try {
+        chrome.runtime.sendMessage({
+          type: 'CHECK_SUBMISSION_DUPLICATE',
+          payload: {
+            problemNumber: payload.problemNumber, problemSlug: payload.problemSlug,
+            problemTitle: payload.problemTitle, language: payload.language, code: payload.code,
+          },
+        }, (result) => {
+          clearTimeout(timeout);
+          resolve(chrome.runtime.lastError ? { success: false, duplicate: false } : (result || { success: false, duplicate: false }));
+        });
+      } catch (_) {
+        clearTimeout(timeout);
+        resolve({ success: false, duplicate: false });
+      }
+    });
+  }
+
   /**
    * Parse a submission response object from LeetCode's API and decide
    * whether it represents an "Accepted" result.
    */
   function handleSubmissionResponse(data) {
-    // LeetCode's submission check returns `status_msg` or `state`
-    const statusMsg   = data?.status_msg   || data?.submissionDetails?.statusDisplay || '';
-    const state       = data?.state        || '';
-    const statusCode  = data?.status_code;
+    // Only inject.js can correlate a final check with a fresh Submit request.
+    const submissionId = data?._verified_submission_id;
+    const stop = (reason) => tracePopup(9, 'STOP: ' + reason, { id: submissionId ?? null });
+    if (!submissionId || data.state !== 'SUCCESS') return stop('missing verified ID or completed state');
+    if (data.status_msg !== 'Accepted' && String(data.status_code) !== '10') return stop('verdict not Accepted');
+    if (data.status_msg != null && data.status_msg !== 'Accepted') return stop('status text conflicts');
+    if (data.status_code != null && String(data.status_code) !== '10') return stop('status code conflicts');
+    if (data.total_correct != null || data.total_testcases != null) {
+      const total = Number(data.total_testcases);
+      if (!Number.isInteger(total) || total <= 0 || Number(data.total_correct) !== total) return stop('test-count checks failed');
+    }
+    const isCurrentProblem = () =>
+      window.location.pathname.match(/^\/problems\/([^/]+)/)?.[1] === data._submitted_problem_slug;
+    if (!isCurrentProblem()) return stop('current problem changed');
+    if (handledSubmissionIds.has(submissionId)) return stop('duplicate submission message');
+    if (modalOpen) return stop('another popup is already open');
+    handledSubmissionIds.add(submissionId);
 
-    // Skip intermediate polling responses (LeetCode returns state=PENDING while judging)
-    if (state === 'PENDING') return;
-
-    const isAccepted =
-      statusMsg === 'Accepted' ||
-      (statusCode === 10) || // LeetCode internal code for Accepted
-      // Use statusDisplay (current submission verdict), NOT status (overall problem status)
-      data?.submissionDetails?.statusDisplay === 'Accepted';
-
-    if (!isAccepted) return;
-    if (modalOpen)    return; // don't show twice
-
-    console.log('[LC Sync] Accepted submission detected!', data);
+    tracePopup(9, 'PASS: popup scheduled', { id: submissionId, delayMs: 800 });
 
     // Give the DOM a moment to update after acceptance.
     // Prefer values extracted directly from the API response by inject.js
     // (lang, code, runtime, memory) — they are more reliable than DOM scraping.
-    setTimeout(() => {
-      const payload = buildSubmissionPayload({
-        code:     data?._extracted_code    || null,
-        language: data?._extracted_lang    || null,
-        runtime:  data?._extracted_runtime || data?.status_runtime || data?.submissionDetails?.runtimeDisplay || null,
-        memory:   data?._extracted_memory  || data?.status_memory  || data?.submissionDetails?.memoryDisplay  || null,
-      });
+    setTimeout(async () => {
+      if (!isCurrentProblem() || modalOpen) return stop('problem changed or another popup opened during delay');
+      try {
+        tracePopup(10, 'Reading problem metadata', { id: submissionId });
+        const payload = buildSubmissionPayload({
+          code:     data?._extracted_code    || null,
+          language: data?._extracted_lang    || null,
+          runtime:  data?._extracted_runtime || data?.status_runtime || data?.submissionDetails?.runtimeDisplay || null,
+          memory:   data?._extracted_memory  || data?.status_memory  || data?.submissionDetails?.memoryDisplay  || null,
+        });
 
-      lastSubmissionData = payload;
-      showSaveModal(payload);
+        tracePopup(10, 'Checking saved primary and alternate solutions for identical code', { id: submissionId });
+        const existing = await checkDuplicateBeforePopup(payload);
+        if (!isCurrentProblem() || modalOpen) return stop('problem changed or another popup opened during duplicate check');
+        if (existing.success && existing.duplicate) {
+          tracePopup(10, 'SKIP: identical solution already saved; no popup', { id: submissionId, match: existing.match });
+          return;
+        }
+        tracePopup(10, existing.success ? 'PASS: no identical saved solution' : 'Duplicate check unavailable; allowing save popup', { id: submissionId });
+        lastSubmissionData = payload;
+        tracePopup(10, 'PASS: metadata ready; constructing popup', {
+          id: submissionId, slug: payload.problemSlug, hasCode: Boolean(payload.code),
+        });
+        showSaveModal(payload);
+      } catch (error) {
+        modalOpen = false;
+        handledSubmissionIds.delete(submissionId);
+        tracePopup(10, 'ERROR: popup construction failed', { id: submissionId, error: error.message, stack: error.stack });
+      }
     }, 800);
   }
 
@@ -463,6 +510,7 @@
     // Topics data loaded from DB; fallback to empty
     let dbTopics    = [];    // [{ name, description }]
     let dbSubtopics = [];    // [{ topic_name, name }]
+    let categoryLookupSucceeded = false;
 
     // ── Inject styles once ──────────────────────
     if (!document.getElementById('lc-sync-styles')) {
@@ -795,6 +843,10 @@
     topicsSectionTitle.className = 'lcsync-section-title';
     topicsSectionTitle.textContent = 'Categorize';
 
+    const categoryHint = document.createElement('div');
+    categoryHint.style.cssText = 'font-size:12px;color:#a1a1aa;margin-bottom:12px;';
+    categoryHint.textContent = 'Loading saved categorization\u2026';
+
     // Topic field
     const topicField = document.createElement('div');
     topicField.className = 'lcsync-field';
@@ -906,6 +958,7 @@
 
     topicSelect.addEventListener('change', () => {
       const val = topicSelect.value;
+      newSubtopicInput.value = '';
       if (val === '__create__') {
         newTopicRow.style.display = 'flex';
         newTopicInput.focus();
@@ -993,6 +1046,7 @@
     });
 
     leftCol.appendChild(topicsSectionTitle);
+    leftCol.appendChild(categoryHint);
     leftCol.appendChild(topicField);
     leftCol.appendChild(subtopicField);
 
@@ -1161,6 +1215,7 @@
     skipBtn.addEventListener('click', () => closeModal(backdrop));
 
     const saveBtn = document.createElement('button');
+    saveBtn.disabled = true;
     saveBtn.className = 'lcsync-btn';
     Object.assign(saveBtn.style, {
       background: '#f97316', color: '#ffffff', minWidth: '130px', fontWeight: '600',
@@ -1177,6 +1232,7 @@
       Save Solution`;
 
     saveBtn.addEventListener('click', async () => {
+      if (saveBtn.disabled) return;
       if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) {
         showToast('Extension reloaded \u2014 please refresh the page.', 'error');
         return;
@@ -1199,9 +1255,13 @@
           chatgptUrl:   chatInput.value.trim() || null,
           youtubeUrl:   ytInput.value.trim()   || null,
           images,
-          userTopic:    resolvedTopic,
-          userSubtopic: resolvedSubtopic,
-          subtopic:     resolvedSubtopic,
+          // If the lookup failed and no selection was made, preserve any
+          // categorization already stored instead of clearing unknown values.
+          ...(categoryLookupSucceeded || resolvedTopic || resolvedSubtopic ? {
+            userTopic:    resolvedTopic,
+            userSubtopic: resolvedSubtopic,
+            subtopic:     resolvedSubtopic,
+          } : {}),
         };
         closeModal(backdrop);
         showToast('Saving solution in background\u2026', 'info');
@@ -1220,6 +1280,7 @@
     modal.appendChild(footer);
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
+    tracePopup(11, 'PASS: popup attached to page', { slug: submissionPayload.problemSlug, attached: backdrop.isConnected });
 
     // Close on backdrop click
     backdrop.addEventListener('click', (e) => {
@@ -1229,34 +1290,62 @@
     // Auto-focus notes
     setTimeout(() => notesArea.focus(), 100);
 
-    // ── Fetch topics from DB asynchronously ───
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
-      chrome.runtime.sendMessage({ type: 'FETCH_TOPICS' }, (result) => {
-        if (result && result.success) {
-          populateTopics(result.topics, result.subtopics);
-        } else {
-          // Fallback: built-in topic list
-          topicSpinner.style.display = 'none';
-          const FALLBACK_TOPICS = [
-            'Array','Strings','Binary Search','Stack','Recursion','Linked List',
-            'Double Linked List','HashMap','Tree','Binary Search Tree','Graph',
-            'Heap','Backtracking','Greedy','Dynamic Programming','Trie','Bit Manipulation',
-          ];
-          topicSelect.innerHTML = '<option value="">Select main topic\u2026</option>';
-          FALLBACK_TOPICS.forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t; opt.textContent = t;
-            topicSelect.appendChild(opt);
+    // Wait for both reads before enabling selection, so a late saved value
+    // cannot overwrite the user's choices or be omitted from an early save.
+    const requestModalData = (message) => new Promise((resolve) => {
+      tracePopup(12, 'Requesting categorization data', { request: message.type });
+      try {
+        chrome.runtime.sendMessage(message, (result) => {
+          tracePopup(12, 'Categorization response received', {
+            request: message.type, success: Boolean(result?.success && !chrome.runtime.lastError),
           });
-          const createOpt = document.createElement('option');
-          createOpt.value = '__create__'; createOpt.textContent = '+ Create new topic\u2026';
-          topicSelect.appendChild(createOpt);
-          topicSelect.disabled = false;
-          dbTopics    = FALLBACK_TOPICS.map(name => ({ name }));
-          dbSubtopics = [];
-        }
+          resolve(chrome.runtime.lastError ? { success: false } : (result || { success: false }));
+        });
+      } catch (_) { resolve({ success: false }); }
+    });
+    Promise.all([
+      requestModalData({ type: 'FETCH_TOPICS' }),
+      requestModalData({
+        type: 'FETCH_SUBMISSION_CATEGORIZATION',
+        payload: {
+          problemNumber: submissionPayload.problemNumber,
+          problemSlug: submissionPayload.problemSlug,
+          problemTitle: submissionPayload.problemTitle,
+          language: submissionPayload.language,
+        },
+      }),
+    ]).then(([result, savedResult]) => {
+      if (!backdrop.isConnected) return;
+      categoryLookupSucceeded = savedResult.success === true;
+      const fallbackTopics = [
+        'Array','Strings','Binary Search','Stack','Recursion','Linked List',
+        'Double Linked List','HashMap','Tree','Binary Search Tree','Graph',
+        'Heap','Backtracking','Greedy','Dynamic Programming','Trie','Bit Manipulation',
+      ];
+      const topics = result.success ? [...(result.topics || [])] : fallbackTopics.map(name => ({ name }));
+      const subtopics = result.success ? [...(result.subtopics || [])] : [];
+      const saved = savedResult.success ? savedResult.categorization : null;
+      // Preserve saved custom names even if they are absent from the catalog.
+      if (saved?.topic && !topics.some(topic => topic.name === saved.topic)) {
+        topics.push({ name: saved.topic });
+      }
+      if (saved?.topic && saved.subtopic && !subtopics.some(sub => sub.topic_name === saved.topic && sub.name === saved.subtopic)) {
+        subtopics.push({ topic_name: saved.topic, name: saved.subtopic });
+      }
+      populateTopics(topics, subtopics);
+      if (saved?.topic) {
+        topicSelect.value = saved.topic;
+        populateSubtopics(saved.topic);
+        subtopicSelect.value = saved.subtopic || '';
+      }
+      categoryHint.textContent = !savedResult.success
+        ? 'Could not load saved categorization. Please select it below.'
+        : saved?.topic ? 'Saved categorization loaded. You can change it below.' : '';
+      saveBtn.disabled = false;
+      tracePopup(12, 'DONE: category selectors and Save enabled', {
+        savedCategoryLoaded: Boolean(saved?.topic), catalogLoaded: Boolean(result.success),
       });
-    }
+    });
   }
 
   function closeModal(backdrop) {
