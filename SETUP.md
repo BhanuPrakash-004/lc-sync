@@ -30,6 +30,8 @@ Your data lives 100% in your own private Supabase PostgreSQL project. Start here
 
    > ✅ This creates all tables (`submissions`, `topics`, `subtopics`, `notes`), indexes, Row Level Security policies, default topic/subtopic seed data, RPC functions, and the `submission-images` storage bucket.
 
+   > **Already set up?** Don't re-run `schema.sql`. Run [`supabase/upgrade_query_indexes.sql`](./supabase/upgrade_query_indexes.sql) once instead to get the current indexes.
+
 ### 1.3 Copy Your API Credentials
 
 After running the schema:

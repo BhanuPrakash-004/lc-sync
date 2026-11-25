@@ -292,7 +292,7 @@ export default function Dashboard() {
     isError: recentError,
   } = useQuery({
     queryKey: ['recent'],
-    queryFn: () => fetchSubmissions({ perPage: 5 }),
+    queryFn: () => fetchSubmissions({ perPage: 5, withCount: false }),
     staleTime: 1000 * 60,
   })
 

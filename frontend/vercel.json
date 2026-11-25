@@ -1,5 +1,15 @@
 {
   "rewrites": [
+    { "source": "/pdf-images/uploads/:path*", "destination": "https://assets.leetcode.com/uploads/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/pdf-images/uploads/:path*",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "sandbox; default-src 'none'" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
   ]
 }

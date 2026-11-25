@@ -20,25 +20,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { Copy, Check, Pencil, ChevronDown, ChevronUp } from 'lucide-react'
 import SyntaxHighlighter from 'react-syntax-highlighter'
 import { atomOneDark } from 'react-syntax-highlighter/dist/esm/styles/hljs'
-
-/* ─── Language → display color ─────────────────────────────────────────────── */
-const LANG_COLORS = {
-  python:     '#3B82F6',
-  python3:    '#3B82F6',
-  javascript: '#F59E0B',
-  typescript: '#60A5FA',
-  java:       '#F97316',
-  cpp:        '#A78BFA',
-  'c++':      '#A78BFA',
-  c:          '#6B7280',
-  go:         '#34D399',
-  rust:       '#FB923C',
-  ruby:       '#F43F5E',
-  kotlin:     '#818CF8',
-  swift:      '#FF6E40',
-  scala:      '#EF4444',
-  sql:        '#22D3EE',
-}
+import { codeLanguageColor } from '../lib/codeTheme'
 
 /* ─── Language → react-syntax-highlighter language name ───────────────────── */
 const LANG_MAP = {
@@ -59,10 +41,6 @@ const LANG_MAP = {
   sql:        'sql',
   mysql:      'sql',
   postgresql: 'sql',
-}
-
-function langColor(lang = '') {
-  return LANG_COLORS[lang.toLowerCase()] ?? '#9CA3AF'
 }
 
 function hlLang(lang = '') {
@@ -279,7 +257,7 @@ export default function CodeEditor({
 
   const lines   = (code || '').split('\n')
   const isLong  = !fillHeight && lines.length > 30
-  const color   = langColor(language)
+  const color   = codeLanguageColor(language)
 
   /* Keep local code in sync when prop changes */
   useEffect(() => { setLocalCode(code) }, [code])

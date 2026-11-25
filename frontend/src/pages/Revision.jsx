@@ -213,10 +213,26 @@ export default function Revision() {
   })
 
   // ── Mutations ─────────────────────────────────────────────────────────────
+  // Apply the saved row to every cached revision view instead of refetching
+  // all accepted submissions after each click.
+  const patchRevisionRow = (saved) => {
+    queryClient.setQueriesData({ queryKey: ['revisionData'] }, (grouped) => {
+      if (!grouped) return grouped
+      const next = {}
+      for (const [topic, subs] of Object.entries(grouped)) {
+        next[topic] = {}
+        for (const [sub, rows] of Object.entries(subs)) {
+          next[topic][sub] = rows.map((row) => (row.id === saved.id ? { ...row, ...saved } : row))
+        }
+      }
+      return next
+    })
+  }
+
   const revisedMutation = useMutation({
     mutationFn: ({ id, val }) => toggleRevised(id, val),
-    onSuccess: (_, { val }) => {
-      queryClient.invalidateQueries({ queryKey: ['revisionData'] })
+    onSuccess: (saved, { val }) => {
+      patchRevisionRow(saved)
       toast.success(val ? '✅ Marked as revised!' : 'Marked as not revised')
     },
     onError: () => toast.error('Failed to update'),
@@ -224,7 +240,11 @@ export default function Revision() {
 
   const qualityMutation = useMutation({
     mutationFn: ({ id, quality }) => updateQuality(id, quality),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['revisionData'] }),
+    onSuccess: (saved) => {
+      patchRevisionRow(saved)
+      // A quality-filtered view may gain or lose this row, so only those refetch.
+      queryClient.invalidateQueries({ queryKey: ['revisionData'], predicate: (q) => q.queryKey[1] != null })
+    },
     onError: () => toast.error('Failed to update quality'),
   })
 

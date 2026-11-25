@@ -38,38 +38,74 @@ const json = (data) => new Response(JSON.stringify(data));
 
 test('categorization lookup prefers the saved language and canonical subtopic', async () => {
   const h = backgroundHarness(() => json([
-    { user_topic: 'Graph', subtopic: 'BFS', language: 'java' },
-    { user_topic: 'Array', subtopic: 'Two Pointers', user_subtopic: 'Old name', language: 'python3' },
+    { problem_id: 1, user_topic: 'Graph', subtopic: 'BFS', language: 'java' },
+    { problem_id: 1, user_topic: 'Array', subtopic: 'Two Pointers', user_subtopic: 'Old name', language: 'python3' },
   ]));
   const result = await h.request('FETCH_SUBMISSION_CATEGORIZATION', { problemNumber: '1', language: 'python3' });
   assert.deepEqual(plain(result), { success: true, categorization: { topic: 'Array', subtopic: 'Two Pointers' } });
-  assert.equal(h.calls[0].url.searchParams.get('problem_id'), 'eq.1');
+  assert.equal(h.calls[0].url.searchParams.get('or'), '(problem_id.eq.1)');
   assert.equal(h.calls[0].url.searchParams.get('order'), 'created_at.desc');
   assert.equal(h.calls[0].method, 'GET');
 });
 
 test('lookup falls back to slug, another language, and the legacy subtopic field', async () => {
-  const h = backgroundHarness(url => json(url.searchParams.has('problem_slug')
-    ? [{ user_topic: 'Array', user_subtopic: 'Hash Map', language: 'java' }] : []));
+  const h = backgroundHarness(() => json([
+    { problem_id: 0, problem_slug: 'two-sum', user_topic: 'Array', user_subtopic: 'Hash Map', language: 'java' },
+  ]));
   const result = await h.request('FETCH_SUBMISSION_CATEGORIZATION', {
     problemNumber: '1', problemSlug: 'two-sum', problemTitle: 'Two Sum', language: 'python3',
   });
   assert.deepEqual(plain(result.categorization), { topic: 'Array', subtopic: 'Hash Map' });
-  assert.equal(h.calls.length, 2);
-  assert.equal(h.calls[1].url.searchParams.get('problem_slug'), 'eq.two-sum');
+  assert.equal(h.calls.length, 1, 'all identifiers are checked in a single request');
+  assert.equal(h.calls[0].url.searchParams.get('or'),
+    '(problem_id.eq.1,problem_slug.eq."two-sum",problem_title.eq."Two Sum")');
 });
 
 test('new problems return no preselection, including title fallback', async () => {
   const h = backgroundHarness(() => json([]));
   const result = await h.request('FETCH_SUBMISSION_CATEGORIZATION', { problemTitle: 'A & B?' });
   assert.deepEqual(plain(result), { success: true, categorization: null });
-  assert.equal(h.calls[0].url.searchParams.get('problem_title'), 'eq.A & B?');
+  assert.equal(h.calls[0].url.searchParams.get('or'), '(problem_title.eq."A & B?")');
+});
+
+test('lookups without any problem identifier make no request', async () => {
+  const h = backgroundHarness(() => { throw new Error('must not fetch'); });
+  const result = await h.request('FETCH_SUBMISSION_CATEGORIZATION', { problemTitle: 'Unknown Problem' });
+  assert.deepEqual(plain(result), { success: true, categorization: null });
+  assert.equal(h.calls.length, 0);
+});
+
+test('single-request lookups keep the problem_id > slug > title priority', async () => {
+  // Newest first, as ordered by the categorization request.
+  const rows = [
+    { id: 9, problem_id: 0, problem_slug: 'two-sum', problem_title: 'Two Sum', user_topic: 'Graph', language: 'python3', code: 'slug row', alternate_codes: [] },
+    { id: 8, problem_id: 0, problem_slug: 'old-slug', problem_title: 'Two Sum', user_topic: 'Tree', language: 'python3', code: 'title row', alternate_codes: [] },
+    { id: 7, problem_id: 1, problem_slug: 'two-sum', problem_title: 'Two Sum', user_topic: 'Array', language: 'python3', code: 'id row', alternate_codes: [] },
+  ];
+  const h = backgroundHarness(() => json(rows));
+  const ids = { problemNumber: 1, problemSlug: 'two-sum', problemTitle: 'Two Sum', language: 'python3' };
+  assert.equal((await h.request('FETCH_SUBMISSION_CATEGORIZATION', ids)).categorization.topic, 'Array');
+  assert.equal((await h.request('CHECK_SUBMISSION_DUPLICATE', { ...ids, code: 'id row' })).match, 'primary');
+  assert.equal((await h.request('CHECK_SUBMISSION_DUPLICATE', { ...ids, code: 'slug row' })).duplicate, false,
+    'a lower-priority match must not shadow the problem_id match');
+  const noId = { ...ids, problemNumber: null };
+  assert.equal((await h.request('FETCH_SUBMISSION_CATEGORIZATION', noId)).categorization.topic, 'Graph');
+  assert.equal((await h.request('CHECK_SUBMISSION_DUPLICATE', { ...noId, code: 'slug row' })).match, 'primary');
+  const titleOnly = { ...ids, problemNumber: null, problemSlug: 'renamed-slug' };
+  assert.equal((await h.request('FETCH_SUBMISSION_CATEGORIZATION', titleOnly)).categorization.topic, 'Graph');
+});
+
+test('identifiers with PostgREST reserved characters are quoted and escaped', async () => {
+  const h = backgroundHarness(() => json([]));
+  await h.request('CHECK_SUBMISSION_DUPLICATE', { problemTitle: 'Pow(x, n) "a\\b".', language: 'C++', code: 'x' });
+  assert.equal(h.calls[0].url.searchParams.get('or'), '(problem_title.eq."Pow(x, n) \\"a\\\\b\\".")');
+  assert.equal(h.calls[0].url.searchParams.get('language'), 'eq.C++');
 });
 
 test('an uncategorized language record still reuses another saved categorization', async () => {
   const h = backgroundHarness(() => json([
-    { user_topic: null, language: 'python3' },
-    { user_topic: 'Array', subtopic: 'Hash Map', language: 'java' },
+    { problem_id: 1, user_topic: null, language: 'python3' },
+    { problem_id: 1, user_topic: 'Array', subtopic: 'Hash Map', language: 'java' },
   ]));
   const result = await h.request('FETCH_SUBMISSION_CATEGORIZATION', { problemNumber: 1, language: 'python3' });
   assert.equal(result.categorization.topic, 'Array');
@@ -103,6 +139,30 @@ test('alternate saves preserve, change, or clear the chosen categorization', asy
   }
 });
 
+test('a new save creates the subtopic only after its topic request finishes', async () => {
+  for (const topicStatus of [201, 409]) { // 409: topic already exists
+    let releaseTopic;
+    const h = backgroundHarness((url, init) => {
+      if (url.pathname.endsWith('/topics')) {
+        return new Promise((resolve) => { releaseTopic = () => resolve(new Response('[]', { status: topicStatus })); });
+      }
+      return json(init.method === 'GET' ? [] : [{ id: 1 }]);
+    });
+    const result = await h.request('SAVE_SUBMISSION', {
+      problemNumber: 1, problemSlug: 'two-sum', description: 'description', language: 'python3',
+      code: 'code', userTopic: 'New Topic', userSubtopic: 'New Pattern',
+    });
+    assert.equal(result.success, true);
+    await flush();
+    const subtopicCalls = () => h.calls.filter(call => call.url.pathname.endsWith('/subtopics'));
+    assert.equal(subtopicCalls().length, 0, 'subtopic must wait for the topic (foreign key)');
+    releaseTopic();
+    await flush(); await flush();
+    assert.equal(subtopicCalls().length, 1);
+    assert.deepEqual(JSON.parse(subtopicCalls()[0].body).name, 'New Pattern');
+  }
+});
+
 test('duplicate lookup detects primary and alternate code using the same rules as saving, without writes', async () => {
   const existing = { id: 7, problem_id: 1, description: 'description', code: 'first approach', alternate_codes: [{ code: 'second approach' }] };
   for (const [code, match] of [['\n first approach \n', 'primary'], ['second approach', 'alternate'], ['third approach', null], ['first  approach', null]]) {
@@ -111,7 +171,9 @@ test('duplicate lookup detects primary and alternate code using the same rules a
     const result = await h.request('CHECK_SUBMISSION_DUPLICATE', payload);
     assert.deepEqual(plain(result), { success: true, duplicate: Boolean(match), match });
     assert.equal(h.calls[0].url.searchParams.get('language'), 'eq.Python3');
-    assert.equal(h.calls[0].url.searchParams.get('problem_id'), 'eq.1');
+    assert.equal(h.calls[0].url.searchParams.get('or'), '(problem_id.eq.1,problem_slug.eq."two-sum")');
+    assert.equal(h.calls[0].url.searchParams.get('select').includes('description'), false,
+      'the pre-popup check does not download the description HTML');
     if (match) {
       const saveResult = await h.request('SAVE_SUBMISSION', payload);
       assert.equal(saveResult.skipped, true, 'preflight and final save must agree');
@@ -121,14 +183,15 @@ test('duplicate lookup detects primary and alternate code using the same rules a
 });
 
 test('duplicate lookup uses slug/title fallbacks and respects language', async () => {
+  // Saved under an older slug, so only the title identifies it.
   const h = backgroundHarness(url => json(
-    url.searchParams.get('language') === 'eq.Python3' && url.searchParams.get('problem_title') === 'eq.Two Sum'
-      ? [{ code: 'saved code' }] : []
+    url.searchParams.get('language') === 'eq.Python3'
+      ? [{ problem_id: 0, problem_slug: 'old-slug', problem_title: 'Two Sum', code: 'saved code' }] : []
   ));
   const payload = { problemSlug: 'two-sum', problemTitle: 'Two Sum', language: 'Python3', code: 'saved code' };
   assert.equal((await h.request('CHECK_SUBMISSION_DUPLICATE', payload)).duplicate, true);
-  assert.equal(h.calls[0].url.searchParams.get('problem_slug'), 'eq.two-sum');
-  assert.equal(h.calls[1].url.searchParams.get('problem_title'), 'eq.Two Sum');
+  assert.equal(h.calls.length, 1, 'all identifiers are checked in a single request');
+  assert.equal(h.calls[0].url.searchParams.get('or'), '(problem_slug.eq."two-sum",problem_title.eq."Two Sum")');
   assert.equal((await h.request('CHECK_SUBMISSION_DUPLICATE', { ...payload, language: 'Java' })).duplicate, false);
 });
 

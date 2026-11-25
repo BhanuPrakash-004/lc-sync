@@ -74,64 +74,77 @@ function normalizeDescriptionImageUrls(description) {
 }
 
 /**
+ * Ways to identify a saved problem, most reliable first: problem_id, then
+ * slug, then title (last resort for pages where scraping failed).
+ */
+function problemMatchers(problemId, problemSlug, problemTitle) {
+  const matchers = [];
+  if (problemId) matchers.push({ column: 'problem_id', value: problemId });
+  if (problemSlug) matchers.push({ column: 'problem_slug', value: problemSlug });
+  if (problemTitle && problemTitle !== 'Unknown Problem') {
+    matchers.push({ column: 'problem_title', value: problemTitle });
+  }
+  return matchers;
+}
+
+/**
+ * PostgREST `or=(...)` filter matching any of the identifiers, so all tiers
+ * are checked in one request instead of up to three sequential ones.
+ * Strings are double-quoted (titles such as "Pow(x, n)" contain the reserved
+ * characters `,` and `()`); inside quotes, `\` escapes the next character.
+ */
+function problemFilter(matchers) {
+  const quote = (value) => `"${String(value).replace(/[\\"]/g, '\\$&')}"`;
+  const parts = matchers.map(({ column, value }) =>
+    `${column}.eq.${typeof value === 'number' ? value : quote(value)}`);
+  return `or=${encodeURIComponent(`(${parts.join(',')})`)}`;
+}
+
+/**
+ * Keep only the rows from the highest-priority identifier that matched,
+ * which is what querying the tiers one at a time used to return.
+ */
+function bestMatchingRows(rows, matchers) {
+  // A row the database matched but we cannot classify still ranks last,
+  // rather than being dropped and causing a duplicate insert.
+  const rank = (row) => {
+    const index = matchers.findIndex(({ column, value }) => row[column] === value);
+    return index === -1 ? matchers.length : index;
+  };
+  const best = Math.min(...rows.map(rank));
+  return rows.filter((row) => rank(row) === best);
+}
+
+const EXISTING_SUBMISSION_COLUMNS =
+  'id,problem_id,problem_slug,problem_title,code,alternate_codes,description,url,tags,difficulty';
+
+/**
  * Locate an existing submission for a problem by ID, slug, or title matching the target language.
  */
-async function findExistingSubmission(supabaseUrl, supabaseKey, problemId, language, problemSlug, problemTitle, reportErrors = false) {
-  // ── 1. Match by problem_id (primary key lookup) ────────────────────────────
-  if (problemId && problemId !== 0) {
-    const endpoint =
-      `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
-      `?problem_id=eq.${problemId}&language=eq.${encodeURIComponent(language)}&select=id,problem_id,code,alternate_codes,problem_title,description,url,tags,difficulty&limit=1`;
+async function findExistingSubmission({
+  supabaseUrl, supabaseKey, problemId, language, problemSlug, problemTitle,
+  reportErrors = false, columns = EXISTING_SUBMISSION_COLUMNS,
+}) {
+  const matchers = problemMatchers(problemId, problemSlug, problemTitle);
+  if (!matchers.length) return null;
 
-    try {
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: buildHeaders(supabaseKey),
-      });
-      if (response.ok) {
-        const rows = await response.json();
-        if (rows.length > 0) return rows[0];
-      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
-    } catch (error) { if (reportErrors) throw error; }
+  const endpoint =
+    `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
+    `?${problemFilter(matchers)}&language=eq.${encodeURIComponent(language)}` +
+    `&select=${columns}&order=created_at.asc`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: buildHeaders(supabaseKey),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const rows = await response.json();
+    return rows.length > 0 ? bestMatchingRows(rows, matchers)[0] : null;
+  } catch (error) {
+    if (reportErrors) throw error;
+    return null;
   }
-
-  // ── 2. Match by problem_slug + language (fallback for unnumbered problems) ─
-  if (problemSlug) {
-    const endpoint =
-      `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
-      `?problem_slug=eq.${encodeURIComponent(problemSlug)}&language=eq.${encodeURIComponent(language)}&select=id,problem_id,code,alternate_codes,problem_title,description,url,tags,difficulty&limit=1`;
-
-    try {
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: buildHeaders(supabaseKey),
-      });
-      if (response.ok) {
-        const rows = await response.json();
-        if (rows.length > 0) return rows[0];
-      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
-    } catch (error) { if (reportErrors) throw error; }
-  }
-
-  // ── 3. Match by problem_title + language (last resort fallback) ────────────
-  if (problemTitle && problemTitle !== 'Unknown Problem') {
-    const endpoint =
-      `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
-      `?problem_title=eq.${encodeURIComponent(problemTitle)}&language=eq.${encodeURIComponent(language)}&select=id,problem_id,code,alternate_codes,problem_title,description,url,tags,difficulty&limit=1`;
-
-    try {
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: buildHeaders(supabaseKey),
-      });
-      if (response.ok) {
-        const rows = await response.json();
-        if (rows.length > 0) return rows[0];
-      } else if (reportErrors) throw new Error(`HTTP ${response.status}`);
-    } catch (error) { if (reportErrors) throw error; }
-  }
-
-  return null;
 }
 
 /** Use the same comparison before the popup and before writing a solution. */
@@ -149,10 +162,16 @@ async function checkSubmissionDuplicate(data = {}) {
   if (typeof data.code !== 'string' || !data.code.trim()) return { success: false, duplicate: false };
   const { supabaseUrl, supabaseKey } = await getCredentials();
   if (!supabaseUrl || !supabaseKey) return { success: false, duplicate: false };
-  const existing = await findExistingSubmission(
-    supabaseUrl, supabaseKey, parseInt(data.problemNumber, 10) || 0,
-    data.language || 'Unknown', data.problemSlug, data.problemTitle, true
-  );
+  // This check delays the popup, so skip the large description column.
+  const existing = await findExistingSubmission({
+    supabaseUrl, supabaseKey,
+    problemId: parseInt(data.problemNumber, 10) || 0,
+    language: data.language || 'Unknown',
+    problemSlug: data.problemSlug,
+    problemTitle: data.problemTitle,
+    reportErrors: true,
+    columns: 'id,problem_id,problem_slug,problem_title,code,alternate_codes',
+  });
   const match = duplicateSolutionKind(existing, data.code);
   return { success: true, duplicate: Boolean(match), match };
 }
@@ -254,10 +273,10 @@ async function saveSubmission(data) {
   }
 
   // Search for existing submission for current problem + language
-  const existing = await findExistingSubmission(
+  const existing = await findExistingSubmission({
     supabaseUrl, supabaseKey, problemId, language, problemSlug,
-    data.problemTitle || 'Unknown Problem'
-  );
+    problemTitle: data.problemTitle || 'Unknown Problem',
+  });
 
   if (existing) {
     const freshDescriptionHasImages = /<img\b/i.test(description || '');
@@ -375,12 +394,14 @@ async function saveSubmission(data) {
     quality:         null,
   };
 
-  // Ensure topic and subtopic entries exist in database tables
+  // Ensure topic and subtopic entries exist in database tables. A subtopic
+  // references its topic by foreign key, so it can only be created after the
+  // topic insert has finished (or failed because the topic already exists).
   if (data.userTopic) {
-    createTopic(data.userTopic).catch(() => {});
-    if (data.userSubtopic || data.subtopic) {
-      createSubtopic(data.userTopic, data.userSubtopic || data.subtopic).catch(() => {});
-    }
+    const subtopicName = data.userSubtopic || data.subtopic;
+    createTopic(data.userTopic)
+      .then(() => subtopicName && createSubtopic(data.userTopic, subtopicName))
+      .catch(() => {});
   }
 
   try {
@@ -481,36 +502,31 @@ async function fetchSubmissionCategorization(data = {}) {
   if (!supabaseUrl || !supabaseKey) return { success: false, error: 'Not configured' };
 
   const problemId = parseInt(data.problemNumber, 10) || 0;
-  const matches = [];
-  if (problemId) matches.push(['problem_id', problemId]);
-  if (data.problemSlug) matches.push(['problem_slug', data.problemSlug]);
-  if (data.problemTitle && data.problemTitle !== 'Unknown Problem') {
-    matches.push(['problem_title', data.problemTitle]);
-  }
+  const matchers = problemMatchers(problemId, data.problemSlug, data.problemTitle);
+  if (!matchers.length) return { success: true, categorization: null };
 
   try {
-    for (const [column, value] of matches) {
-      const endpoint = `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
-        `?${column}=eq.${encodeURIComponent(value)}` +
-        '&select=user_topic,user_subtopic,subtopic,language&order=created_at.desc';
-      const response = await fetch(endpoint, { method: 'GET', headers: buildHeaders(supabaseKey) });
-      if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
-      const rows = await response.json();
-      if (!rows.length) continue;
+    const endpoint = `${supabaseUrl}/rest/v1/${SUPABASE_TABLE}` +
+      `?${problemFilter(matchers)}` +
+      '&select=problem_id,problem_slug,problem_title,user_topic,user_subtopic,subtopic,language' +
+      '&order=created_at.desc';
+    const response = await fetch(endpoint, { method: 'GET', headers: buildHeaders(supabaseKey) });
+    if (!response.ok) return { success: false, error: `HTTP ${response.status}` };
+    const found = await response.json();
+    if (!found.length) return { success: true, categorization: null };
+    const rows = bestMatchingRows(found, matchers);
 
-      // Prefer the record this language will update, then reuse the problem's
-      // most recent categorization even when solving it in another language.
-      const saved = rows.find(row => row.language === data.language && row.user_topic) ||
-        rows.find(row => row.user_topic) || rows[0];
-      return {
-        success: true,
-        categorization: {
-          topic: saved.user_topic || null,
-          subtopic: saved.subtopic ?? saved.user_subtopic ?? null,
-        },
-      };
-    }
-    return { success: true, categorization: null };
+    // Prefer the record this language will update, then reuse the problem's
+    // most recent categorization even when solving it in another language.
+    const saved = rows.find(row => row.language === data.language && row.user_topic) ||
+      rows.find(row => row.user_topic) || rows[0];
+    return {
+      success: true,
+      categorization: {
+        topic: saved.user_topic || null,
+        subtopic: saved.subtopic ?? saved.user_subtopic ?? null,
+      },
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }

@@ -1,5 +1,31 @@
 import { supabase } from './supabase'
 
+// Supabase returns at most 1,000 rows per request by default (PostgREST
+// max-rows), so reads that need every row must page through the results.
+const PAGE_SIZE = 1000
+
+/**
+ * Read every row of a query. `buildQuery(withCount)` must order by a unique
+ * column last so pages never overlap. The first page also returns the total,
+ * so a table that fits in one page still takes a single request. Each page
+ * starts after the rows actually received, so a lower server limit is safe.
+ */
+async function fetchAllRows(buildQuery) {
+  const rows = []
+  let total = null
+  do {
+    const { data, error, count } = await buildQuery(total === null)
+      .range(rows.length, rows.length + PAGE_SIZE - 1)
+    if (error) throw error
+    if (total === null) total = count ?? 0
+    if (!data?.length) break
+    rows.push(...data)
+  } while (rows.length < total)
+  return rows
+}
+
+const countOption = (withCount) => (withCount ? { count: 'exact' } : undefined)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SUBMISSIONS — CRUD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,13 +44,15 @@ export async function fetchSubmissions({
   sortOrder = 'desc',
   page = 1,
   perPage = 10,   // Default 10 for infinite scroll
+  withCount = true, // Exact counts re-run the filtered query; skip when unused
 } = {}) {
-  // Lightweight column selection for list view
+  // Lightweight column selection for list view. `notes` can still be
+  // searched below without downloading it for every row.
   let query = supabase
     .from('submissions')
     .select(
-      'id,problem_id,problem_title,problem_slug,difficulty,tags,language,runtime,memory,submission_time,created_at,updated_at,url,notes,user_topic,user_subtopic',
-      { count: 'exact' }
+      'id,problem_id,problem_title,problem_slug,difficulty,tags,language,runtime,memory,submission_time,created_at,updated_at,url,user_topic,user_subtopic',
+      withCount ? { count: 'exact' } : undefined
     )
     .eq('is_accepted', true)
 
@@ -42,9 +70,10 @@ export async function fetchSubmissions({
   query = query.range((page - 1) * perPage, page * perPage - 1)
 
   if (search) {
-    query = query.or(
-      `problem_title.ilike.%${search}%,notes.ilike.%${search}%`
-    )
+    // Quote the pattern: titles such as "Pow(x, n)" contain `,` and `()`,
+    // which otherwise break PostgREST's or=() syntax (HTTP 400).
+    const pattern = `"%${search.replace(/[\\"]/g, '\\$&')}%"`
+    query = query.or(`problem_title.ilike.${pattern},notes.ilike.${pattern}`)
   }
   if (difficulty) query = query.eq('difficulty', difficulty)
   if (tag || topic) {
@@ -152,19 +181,6 @@ export async function deleteSubmission(id) {
 }
 
 /**
- * Manually create a submission from the frontend.
- */
-export async function createSubmission(submission) {
-  const { data, error } = await supabase
-    .from('submissions')
-    .insert(submission)
-    .select()
-    .single()
-  if (error) throw error
-  return data
-}
-
-/**
  * Add an alternate code approach to an existing submission.
  * Prevents duplicates and identical code.
  */
@@ -249,14 +265,6 @@ export async function removeAlternateCode(submissionId, altId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PAGE BLOCKS — Notion-style content
-// ─────────────────────────────────────────────────────────────────────────────
-
-export async function savePageBlocks(submissionId, blocks) {
-  return updateSubmission(submissionId, { page_blocks: blocks })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // IMAGES
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -288,21 +296,22 @@ export async function uploadImage(file, submissionId) {
 export async function fetchStats() {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [totalRes, easyRes, mediumRes, hardRes, allRes] = await Promise.all([
+  const [totalRes, easyRes, mediumRes, hardRes, rows] = await Promise.all([
     supabase.from('submissions').select('id', { count: 'exact', head: true }).eq('is_accepted', true),
     supabase.from('submissions').select('id', { count: 'exact', head: true }).eq('difficulty', 'Easy').eq('is_accepted', true),
     supabase.from('submissions').select('id', { count: 'exact', head: true }).eq('difficulty', 'Medium').eq('is_accepted', true),
     supabase.from('submissions').select('id', { count: 'exact', head: true }).eq('difficulty', 'Hard').eq('is_accepted', true),
-    supabase
+    // Every submission from the last 90 days (the window bounds the payload).
+    fetchAllRows((withCount) => supabase
       .from('submissions')
-      .select('created_at, tags, language')
+      .select('created_at, tags, language', countOption(withCount))
       .eq('is_accepted', true)
-      .gte('created_at', ninetyDaysAgo)  // Only last 90 days — keeps payload bounded
+      .gte('created_at', ninetyDaysAgo)
       .order('created_at', { ascending: false })
-      .limit(500),
+      .order('id', { ascending: true }))
+      // As before, a failed read leaves the charts empty instead of hiding the counts.
+      .catch(() => []),
   ])
-
-  const rows = allRes.data || []
 
   // Activity heatmap: local date string → count
   const activityMap = {}
@@ -354,19 +363,19 @@ export async function fetchStats() {
  * Optimized: lightweight columns only.
  */
 export async function fetchTopics() {
-  const [submissionsRes, topicsRes] = await Promise.all([
-    supabase
+  const [submissions, topicsRes] = await Promise.all([
+    fetchAllRows((withCount) => supabase
       .from('submissions')
-      .select('id,problem_id,problem_title,difficulty,tags,user_topic,language,runtime,memory,created_at,url')
+      .select('id,problem_id,problem_title,difficulty,tags,user_topic,language,runtime,memory,created_at,url', countOption(withCount))
       .eq('is_accepted', true)
-      .order('problem_id', { ascending: true }),
+      .order('problem_id', { ascending: true })
+      .order('id', { ascending: true })),
     supabase
       .from('topics')
       .select('name,sort_order')
       .order('sort_order', { ascending: true }),
   ])
 
-  if (submissionsRes.error) throw submissionsRes.error
   if (topicsRes.error) throw topicsRes.error
 
   const grouped = {}
@@ -380,7 +389,7 @@ export async function fetchTopics() {
 
   // Use the selected database topic. For legacy submissions without one, use
   // a matching tag only when that tag is already a database-managed topic.
-  ;(submissionsRes.data || []).forEach((row) => {
+  submissions.forEach((row) => {
     const topicName = row.user_topic || row.tags?.find((tag) => canonicalNames.has(tag))
     if (topicName && grouped[topicName]) grouped[topicName].push(row)
   })
@@ -391,21 +400,6 @@ export async function fetchTopics() {
   })
 
   return grouped
-}
-
-/**
- * Fetch submissions for a specific topic tag.
- */
-export async function fetchSubmissionsByTopic(tag) {
-  const { data, error } = await supabase
-    .from('submissions')
-    .select('id,problem_id,problem_title,difficulty,tags,language,runtime,memory,created_at,url,notes')
-    .eq('is_accepted', true)
-    .contains('tags', [tag])
-    .order('problem_id', { ascending: true })
-
-  if (error) throw error
-  return data || []
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -419,147 +413,105 @@ export async function fetchAllTags() {
   if (!rpcErr && Array.isArray(rpcData)) return rpcData.sort()
 
   // Fallback: fetch raw tags and deduplicate client-side
-  const { data, error } = await supabase
+  const rows = await fetchAllRows((withCount) => supabase
     .from('submissions')
-    .select('tags')
+    .select('tags', countOption(withCount))
     .eq('is_accepted', true)
-  if (error) throw error
+    .order('id', { ascending: true }))
   const tagSet = new Set()
-  data?.forEach((row) => row.tags?.forEach((t) => tagSet.add(t)))
+  rows.forEach((row) => row.tags?.forEach((t) => tagSet.add(t)))
   return Array.from(tagSet).sort()
 }
 
 /** Return sorted list of all unique languages in the DB */
 export async function fetchAllLanguages() {
-  const { data, error } = await supabase
+  const rows = await fetchAllRows((withCount) => supabase
     .from('submissions')
-    .select('language')
+    .select('language', countOption(withCount))
     .eq('is_accepted', true)
-  if (error) throw error
-  const langSet = new Set(data?.map((r) => r.language).filter(Boolean))
+    .order('id', { ascending: true }))
+  const langSet = new Set(rows.map((r) => r.language).filter(Boolean))
   return Array.from(langSet).sort()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REVISION — Spaced repetition helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-function getLocalDateString(d = new Date()) {
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd}`
-}
-
-/**
- * Fetch problems due for revision today (next_revision_date <= today).
- * Lightweight: only fetches id, problem_title, difficulty, next_revision_date, revision_count.
- */
-export async function fetchRevisionDue() {
-  const today = getLocalDateString(new Date());
-  const { data, error } = await supabase
-    .from('submissions')
-    .select('id,problem_id,problem_title,difficulty,next_revision_date,revision_count,last_revised_at')
-    .eq('is_accepted', true)
-    .or(`next_revision_date.lte.${today},next_revision_date.is.null`)
-    .order('next_revision_date', { ascending: true, nullsFirst: false })
-    .limit(20);
-  if (error) throw error;
-  return data || [];
-}
-
-/**
- * Mark a problem as revised with a difficulty rating.
- * Updates last_revised_at, revision_count, next_revision_date using simple spacing:
- *  easy -> +7 days, medium -> +3 days, hard -> +1 day
- */
-export async function updateRevision(submissionId, difficulty = 'medium') {
-  const spacingDays = { easy: 7, medium: 3, hard: 1 };
-  const days = spacingDays[difficulty] || 3;
-  const nextDate = getLocalDateString(new Date(Date.now() + days * 24 * 60 * 60 * 1000));
-
-  // Increment revision_count by fetching current first
-  const { data: current } = await supabase
-    .from('submissions')
-    .select('revision_count')
-    .eq('id', submissionId)
-    .single();
-
-  const newCount = (current?.revision_count || 0) + 1;
-
-  const { data, error } = await supabase
-    .from('submissions')
-    .update({
-      last_revised_at: new Date().toISOString(),
-      revision_count: newCount,
-      next_revision_date: nextDate,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', submissionId)
-    .select('id,revision_count,next_revision_date')
-    .single();
-
-  if (error) throw error;
-  return data;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EXPORT / CLEAR
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Every submission with all columns, newest first (Settings → Export). */
 export async function exportAllData() {
-  const { data, error } = await supabase
+  return fetchAllRows((withCount) => supabase
     .from('submissions')
-    .select('*')
+    .select('*', countOption(withCount))
     .order('created_at', { ascending: false })
-  if (error) throw error
-  return data
+    .order('id', { ascending: true }))
 }
 
-export async function clearAllData() {
-  // 1. Fetch all submissions with page_blocks and alternate_codes
-  const { data: rows } = await supabase
-    .from('submissions')
-    .select('id, page_blocks, alternate_codes')
+const STORAGE_PAGE = 100     // storage list() default page size
+const REMOVE_BATCH = 100     // well under the bulk-delete limit (1,000 by default)
+const LIST_CONCURRENCY = 6
+const SUBMISSION_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-  // 2. Collect all storage paths to delete
-  if (rows && rows.length > 0) {
-    const allPaths = new Set()
+/** Every entry directly inside `folder` of the submission-images bucket. */
+async function listImageEntries(folder) {
+  const entries = []
+  for (;;) {
+    const { data, error } = await supabase.storage
+      .from('submission-images')
+      .list(folder, { limit: STORAGE_PAGE, offset: entries.length })
+    if (error) throw error
+    entries.push(...(data ?? []))
+    if (!data || data.length < STORAGE_PAGE) return entries
+  }
+}
 
-    for (const row of rows) {
-      // 2a. Files listed under the storage folder
-      const { data: files } = await supabase.storage.from('submission-images').list(row.id)
-      if (files && files.length > 0) {
-        files.forEach((f) => allPaths.add(`${row.id}/${f.name}`))
-      }
+/**
+ * Delete the images in every submission folder (named by submission id).
+ * Listing the bucket rather than the current rows also removes images left
+ * behind by earlier clears, which deleted rows only. Anything else in the
+ * bucket is left alone. Returns the number of images deleted.
+ */
+async function deleteAllSubmissionImages() {
+  // Storage lists folders as entries without an id.
+  const folders = (await listImageEntries(''))
+    .filter((entry) => entry.id == null && SUBMISSION_FOLDER.test(entry.name))
+    .map((entry) => entry.name)
 
-      // 2b. Image blocks in primary page_blocks
-      if (row.page_blocks) {
-        extractBlockImagePaths(row.id, row.page_blocks).forEach((p) => allPaths.add(p))
-      }
-
-      // 2c. Image blocks in alternate approaches
-      if (Array.isArray(row.alternate_codes)) {
-        for (const alt of row.alternate_codes) {
-          if (alt.page_blocks) {
-            extractBlockImagePaths(row.id, alt.page_blocks).forEach((p) => allPaths.add(p))
-          }
-        }
-      }
-    }
-
-    // Delete all collected storage files in one batch
-    if (allPaths.size > 0) {
-      await supabase.storage.from('submission-images').remove([...allPaths])
-    }
+  const paths = []
+  for (let i = 0; i < folders.length; i += LIST_CONCURRENCY) {
+    const listed = await Promise.all(folders.slice(i, i + LIST_CONCURRENCY).map(async (folder) =>
+      (await listImageEntries(folder))
+        .filter((entry) => entry.id != null)
+        .map((entry) => `${folder}/${entry.name}`)))
+    listed.forEach((folderPaths) => paths.push(...folderPaths))
   }
 
-  // 3. Delete all submission rows (cascades to notes)
+  for (let i = 0; i < paths.length; i += REMOVE_BATCH) {
+    const { error } = await supabase.storage
+      .from('submission-images')
+      .remove(paths.slice(i, i + REMOVE_BATCH))
+    if (error) throw error
+  }
+  return paths.length
+}
+
+/**
+ * Delete every submission (notes cascade), then all submission images.
+ * Rows go first, so a storage failure can only leave unused images behind,
+ * never submissions with missing images. Throws only if the rows could not
+ * be deleted; an image failure is returned for the caller to report.
+ */
+export async function clearAllData() {
   const { error } = await supabase
     .from('submissions')
     .delete()
     .neq('id', '00000000-0000-0000-0000-000000000000')
   if (error) throw error
+  try {
+    return { imagesDeleted: await deleteAllSubmissionImages(), imageError: null }
+  } catch (imageError) {
+    return { imagesDeleted: 0, imageError }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -600,23 +552,21 @@ export async function updateQuality(id, quality) {
  * Returns: { topicName: { subtopicName: [submission, ...], ... }, ... }
  */
 export async function fetchRevisionData({ qualityFilter = null } = {}) {
-  let query = supabase
-    .from('submissions')
-    .select('id,problem_id,problem_title,difficulty,tags,language,runtime,memory,created_at,url,user_topic,subtopic,is_revised,quality')
-    .eq('is_accepted', true)
-    .order('problem_id', { ascending: true })
-
-  if (qualityFilter !== null) {
-    query = query.eq('quality', qualityFilter)
-  }
-
-  const { data, error } = await query
-  if (error) throw error
+  const data = await fetchAllRows((withCount) => {
+    let query = supabase
+      .from('submissions')
+      .select('id,problem_id,problem_title,difficulty,tags,language,runtime,memory,created_at,url,user_topic,subtopic,is_revised,quality', countOption(withCount))
+      .eq('is_accepted', true)
+    if (qualityFilter !== null) query = query.eq('quality', qualityFilter)
+    return query
+      .order('problem_id', { ascending: true })
+      .order('id', { ascending: true })
+  })
 
   // Group by user_topic (main) → subtopic
   const grouped = {}
 
-  ;(data || []).forEach((row) => {
+  data.forEach((row) => {
     const mainTopic = row.user_topic || (row.tags && row.tags[0]) || 'Uncategorized'
     const sub = row.subtopic || 'General'
 
@@ -626,21 +576,6 @@ export async function fetchRevisionData({ qualityFilter = null } = {}) {
   })
 
   return grouped
-}
-
-/**
- * Fetch all problems for a specific topic grouped by subtopic.
- */
-export async function fetchTopicProblems(topicName) {
-  const { data, error } = await supabase
-    .from('submissions')
-    .select('id,problem_id,problem_title,difficulty,tags,language,runtime,url,user_topic,subtopic,is_revised,quality,created_at')
-    .eq('is_accepted', true)
-    .eq('user_topic', topicName)
-    .order('problem_id', { ascending: true })
-
-  if (error) throw error
-  return data || []
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

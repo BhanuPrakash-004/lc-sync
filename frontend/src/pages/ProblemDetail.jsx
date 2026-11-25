@@ -19,6 +19,7 @@ import {
   fetchSubmission, updateSubmission, deleteSubmission,
   removeAlternateCode,
 } from '../lib/api'
+import { groupPDFProblems } from '../lib/pdfGroups'
 import LeftPanel from '../components/problem-detail/LeftPanel'
 import { RightCodePanel, MobileCodePanel } from '../components/problem-detail/CodePanels'
 import { AddAlternateModal, DeleteModal } from '../components/problem-detail/Modals'
@@ -49,175 +50,6 @@ function TagChip({ tag }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PDF Export Helper
-// ─────────────────────────────────────────────────────────────────────────────
-const esc = (s = '') =>
-  String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-
-function renderDescriptionHTML(description) {
-  if (!description || !description.trim()) return ''
-  const isHtml = /<[a-z][\s\S]*>/i.test(description) || description.trimStart().startsWith('<')
-  if (isHtml) {
-    const processed = description.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
-      if (!/referrerpolicy/i.test(attrs)) {
-        return `<img${attrs} referrerpolicy="no-referrer">`
-      }
-      return match
-    })
-    return `<div class="desc-section"><h2>📄 Problem Description</h2><div class="desc-content">${processed}</div></div>`
-  }
-  return `<div class="desc-section"><h2>📄 Problem Description</h2><div class="desc-content"><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.6;margin:0;">${esc(description)}</pre></div></div>`
-}
-
-function renderPageBlocksHTML(blocks) {
-  if (!Array.isArray(blocks) || blocks.length === 0) return ''
-  return blocks
-    .map((b) => {
-      if (!b) return ''
-      const content = b.content || ''
-      if (b.type === 'h1') return `<h2 style="font-size:16px;font-weight:700;margin:14px 0 6px;color:#1e293b;">${esc(content)}</h2>`
-      if (b.type === 'h2') return `<h3 style="font-size:15px;font-weight:700;margin:12px 0 6px;color:#1e293b;">${esc(content)}</h3>`
-      if (b.type === 'h3') return `<h4 style="font-size:14px;font-weight:600;margin:10px 0 4px;color:#334155;">${esc(content)}</h4>`
-      if (b.type === 'text') return content ? `<p style="margin:6px 0;line-height:1.6;color:#334155;white-space:pre-wrap;">${esc(content)}</p>` : ''
-      if (b.type === 'bullet') return `<div style="margin:4px 0;padding-left:12px;color:#334155;">• ${esc(content)}</div>`
-      if (b.type === 'todo')
-        return `<div style="margin:4px 0;color:#334155;">${b.checked ? '☑' : '☐'} <span style="${b.checked ? 'text-decoration:line-through;color:#9ca3af;' : ''}">${esc(content)}</span></div>`
-      if (b.type === 'code')
-        return `<div class="code-block" style="margin:10px 0;"><div class="code-label">${esc((b.language || 'code').toUpperCase())}</div><pre><code class="language-${esc((b.language||'plaintext').toLowerCase())}">${esc(content)}</code></pre></div>`
-      if (b.type === 'image') {
-        if (!content) return ''
-        return `
-          <div style="margin:14px 0;text-align:center;page-break-inside:avoid;">
-            <img src="${esc(content)}" alt="${esc(b.caption || 'Image')}" referrerpolicy="no-referrer" crossorigin="anonymous" style="max-width:100%;max-height:400px;object-fit:contain;border-radius:8px;border:1px solid #e2e8f0;box-shadow:0 2px 4px rgba(0,0,0,0.05);display:inline-block;" />
-            ${b.caption ? `<div style="font-size:11px;color:#64748b;font-style:italic;margin-top:4px;">${esc(b.caption)}</div>` : ''}
-          </div>`
-      }
-      if (b.type === 'link') {
-        return `<div style="margin:6px 0;"><a href="${esc(b.url || '#')}" style="color:#f97316;text-decoration:none;font-weight:600;font-size:12px;">🔗 ${esc(b.title || b.url)}</a></div>`
-      }
-      if (b.type === 'chatgpt') {
-        return `<div style="margin:6px 0;"><a href="${esc(b.url || '#')}" style="color:#10b981;text-decoration:none;font-weight:600;font-size:12px;">💬 ${esc(b.title || 'ChatGPT Discussion')}</a></div>`
-      }
-      if (b.type === 'callout')
-        return `<div class="callout" style="background:#fffbeb;border-left:3px solid #f59e0b;padding:8px 12px;margin:10px 0;border-radius:4px;color:#92400e;">${esc(b.icon || '💡')} ${esc(content)}</div>`
-      if (b.type === 'divider') return '<hr style="border:none;border-top:1px solid #e2e8f0;margin:14px 0;" />'
-      return content ? `<p style="margin:6px 0;color:#334155;">${esc(content)}</p>` : ''
-    })
-    .filter(Boolean)
-    .join('\n')
-}
-
-function generatePDF(submission, primaryMeta, altMetas) {
-  const title       = submission.problem_title || 'Problem'
-  const lcNum       = submission.problem_id > 0 ? `LC #${submission.problem_id}` : ''
-  const difficulty  = submission.difficulty || ''
-  const language    = submission.language || ''
-  const alternates  = submission.alternate_codes || []
-  const description = submission.description || ''
-  const leetcodeUrl = submission.url || ''
-  const tags        = submission.tags || []
-
-  const codeBlock = (sectionLabel, lang, codeStr, meta) => {
-    const cgLinks = meta?.chatgptUrls?.filter(Boolean) || []
-    const ytLinks = meta?.youtubeUrls?.filter(Boolean) || []
-    const blocksHtml = renderPageBlocksHTML(meta?.pageBlocks)
-    const plainNotes = meta?.notes ? `<p style="white-space:pre-wrap;margin:4px 0;">${esc(meta.notes)}</p>` : ''
-
-    return `
-    <div class="code-block">
-      <div class="code-label">${esc(sectionLabel)} <span class="lang-badge">${esc(lang)}</span>
-        ${meta?.runtime ? `<span class="perf-badge">⚡ ${esc(meta.runtime)}</span>` : ''}
-        ${meta?.memory  ? `<span class="perf-badge">📦 ${esc(meta.memory)}</span>`  : ''}
-      </div>
-      ${(blocksHtml || plainNotes) ? `<div class="approach-note">📝 <strong>Notes &amp; Blocks</strong>${plainNotes}${blocksHtml}</div>` : ''}
-      ${cgLinks.map((u, i) => `<div class="link-item"><a href="${esc(u)}">💬 ChatGPT${cgLinks.length > 1 ? ` ${i+1}` : ''}</a></div>`).join('')}
-      ${ytLinks.map((u, i) => `<div class="link-item"><a href="${esc(u)}">▶ YouTube${ytLinks.length > 1 ? ` ${i+1}` : ''}</a></div>`).join('')}
-      <pre><code class="language-${esc((lang||'plaintext').toLowerCase())}">${esc(codeStr)}</code></pre>
-    </div>`
-  }
-
-  const descHtml = renderDescriptionHTML(description)
-  const allChatgpt = [...(primaryMeta.chatgptUrls || [])].filter(Boolean)
-  const allYoutube = [...(primaryMeta.youtubeUrls || [])].filter(Boolean)
-
-  const css = `
-    * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; margin: 32px; color: #0f172a; max-width: 920px; background: #fff; font-size: 13px; }
-    h1 { font-size: 22px; font-weight: 800; margin: 0 0 6px; color: #0f172a; }
-    .meta { font-size: 12px; color: #64748b; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .easy { background: #d1fae5; color: #065f46; } .medium { background: #fef9c3; color: #92400e; } .hard { background: #fee2e2; color: #991b1b; }
-    .links-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; margin: 10px 0 16px; }
-    .links-bar a { color: #ea580c; text-decoration: none; font-size: 12px; font-weight: 600; }
-    .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-    .tag { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 8px; font-size: 11px; color: #475569; }
-    .desc-section { padding: 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 24px; page-break-inside: avoid; }
-    .desc-section h2 { font-size: 14px; font-weight: 700; margin: 0 0 10px; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
-    .desc-content { font-size: 13px; line-height: 1.65; color: #334155; }
-    .desc-content p { margin: 8px 0; }
-    .desc-content pre { background: #f1f5f9; padding: 10px 12px; border-radius: 6px; font-family: monospace; font-size: 12px; white-space: pre-wrap; color: #0f172a; border: 1px solid #cbd5e1; }
-    .desc-content code { background: #f1f5f9; padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #ea580c; }
-    .desc-content img { max-width: 100%; height: auto; border-radius: 6px; margin: 10px 0; display: block; }
-    .desc-content table { border-collapse: collapse; width: 100%; margin: 12px 0; }
-    .desc-content th, .desc-content td { border: 1px solid #cbd5e1; padding: 6px 10px; font-size: 12px; text-align: left; }
-    .desc-content th { background: #f1f5f9; font-weight: 600; }
-    .desc-content ul, .desc-content ol { padding-left: 20px; margin: 8px 0; }
-    .code-block { margin: 18px 0; border: 1px solid #334155; border-radius: 8px; overflow: hidden; background: #1e1e2e; page-break-inside: avoid; }
-    .code-label { font-weight: 700; font-size: 12px; padding: 8px 14px; background: #2d2d3f; color: #f97316; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-    .lang-badge { font-weight: 400; color: #94a3b8; font-size: 11px; background: #1e1e2e; padding: 2px 6px; border-radius: 4px; }
-    .perf-badge { font-size: 11px; font-weight: 400; color: #cbd5e1; }
-    .approach-note { font-size: 12px; color: #334155; padding: 12px 14px; background: #fffbeb; border-bottom: 1px solid #fde68a; }
-    .link-item { font-size: 12px; padding: 6px 14px; background: #252538; border-bottom: 1px solid #334155; }
-    .link-item a { color: #34d399; text-decoration: none; font-weight: 500; }
-    pre { background: #1e1e2e; padding: 14px; font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin: 0; color: #f8fafc; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Courier New', monospace; }
-    code { font-family: inherit; }
-    .callout { background: #fffbeb; border-left: 3px solid #f59e0b; border-radius: 4px; padding: 8px 12px; margin: 8px 0; font-size: 12px; color: #92400e; }
-    hr { border: none; border-top: 1px solid #e2e8f0; margin: 20px 0; }
-    @media print { body { margin: 12px; } .code-block, .desc-section { page-break-inside: avoid; } }
-  `
-
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>${lcNum ? lcNum + ' — ' : ''}${esc(title)}</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-<style>${css}</style></head>
-<body>
-<h1>${lcNum ? `<span style="color:#64748b;font-size:16px">${esc(lcNum)}</span> ` : ''}${esc(title)}</h1>
-<div class="meta">
-  ${difficulty ? `<span class="badge ${difficulty.toLowerCase()}">${esc(difficulty)}</span>` : ''}
-  <span>${esc(language)}</span>
-  ${primaryMeta.runtime ? `<span>⚡ ${esc(primaryMeta.runtime)}</span>` : ''}
-  ${primaryMeta.memory  ? `<span>📦 ${esc(primaryMeta.memory)}</span>`  : ''}
-  ${submission.submission_time || submission.created_at ? `<span>📅 ${format(new Date(submission.submission_time || submission.created_at), 'MMM d, yyyy')}</span>` : ''}
-</div>
-${tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${esc(typeof t === 'string' ? t : t.name)}</span>`).join('')}</div>` : ''}
-${(leetcodeUrl || allChatgpt.length || allYoutube.length) ? `
-<div class="links-bar">
-  ${leetcodeUrl ? `<a href="${esc(leetcodeUrl)}">\ud83d\udd17 LeetCode Problem</a>` : ''}
-  ${allChatgpt.map((u,i) => `<a href="${esc(u)}">💬 ChatGPT${allChatgpt.length>1?` ${i+1}`:''}</a>`).join('')}
-  ${allYoutube.map((u,i) => `<a href="${esc(u)}">▶ YouTube${allYoutube.length>1?` ${i+1}`:''}</a>`).join('')}
-</div>` : ''}
-${descHtml}
-${codeBlock('Primary Solution', language, submission.code || '', primaryMeta)}
-${alternates.map((a, i) => {
-  const m = altMetas[a.id] || buildAltMeta(a)
-  return codeBlock(a.label || `Alternate Approach ${i+1}`, a.language || language, a.code || '', m)
-}).join('')}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"><\/script>
-<script>hljs.highlightAll();<\/script>
-</body></html>`
-
-  const win = window.open('', '_blank')
-  if (!win) { toast.error('Allow popups to download PDF'); return }
-  win.document.write(html)
-  win.document.close()
-  setTimeout(() => win.print(), 800)
-}
-
 function normalizeLinks(...sources) {
   return [...new Set(sources.flat().filter(Boolean))]
 }
@@ -244,6 +76,20 @@ function buildAltMeta(alt) {
   }
 }
 
+function withExportMeta(item, meta) {
+  return {
+    ...item,
+    runtime: meta.runtime,
+    memory: meta.memory,
+    notes: meta.notes,
+    page_blocks: meta.pageBlocks,
+    chatgpt_urls: meta.chatgptUrls,
+    chatgpt_url: null,
+    youtube_urls: meta.youtubeUrls,
+    youtube_url: null,
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ProblemDetail — main component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -255,6 +101,7 @@ export default function ProblemDetail() {
   const [activeApproach, setActiveApproach]   = useState('primary')
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [showAddAlternate, setShowAddAlternate] = useState(false)
+  const [downloadingPDF, setDownloadingPDF] = useState(false)
 
   // Metas
   const [primaryMeta, setPrimaryMeta] = useState({ runtime: '', memory: '', notes: '', pageBlocks: [], chatgptUrls: [], youtubeUrls: [] })
@@ -467,6 +314,24 @@ export default function ProblemDetail() {
     removeAltMutation.mutate({ altId })
   }, [removeAltMutation])
 
+  const handleDownloadPDF = async () => {
+    setDownloadingPDF(true)
+    try {
+      const { downloadPDF } = await import('../lib/pdfExport')
+      const problem = {
+        ...withExportMeta(submission, primaryMeta),
+        alternate_codes: alternates.map((alt) => withExportMeta(alt, altMetas[alt.id] || buildAltMeta(alt))),
+      }
+      const missing = await downloadPDF(groupPDFProblems([problem], []), { single: true })
+      if (missing) toast(`Download started. ${missing} ${missing === 1 ? 'image was' : 'images were'} unavailable.`)
+      else toast.success('PDF download started.')
+    } catch (err) {
+      toast.error(`PDF generation failed: ${err?.message || 'Unknown error'}`)
+    } finally {
+      setDownloadingPDF(false)
+    }
+  }
+
   // ── Guards ─────────────────────────────────────────────────────────────────
   if (isLoading) return <div className="flex items-center justify-center h-full"><Loader2 className="w-8 h-8 text-orange-500 animate-spin" /></div>
   if (isError || !submission) return (
@@ -523,9 +388,10 @@ export default function ProblemDetail() {
                 <Save className="w-3.5 h-3.5" /><span className="hidden sm:inline">Save</span>
               </button>
             )}
-            <button onClick={() => generatePDF(submission, primaryMeta, altMetas)}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/40 text-xs font-medium transition" title="Print / Save as PDF">
-              <FileDown className="w-3.5 h-3.5" /><span className="hidden sm:inline">PDF</span>
+            <button onClick={handleDownloadPDF} disabled={downloadingPDF} aria-label="Download PDF" aria-busy={downloadingPDF}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-orange-500/15 hover:bg-orange-500/25 text-orange-300 border border-orange-500/30 text-xs font-medium transition disabled:opacity-60" title="Download PDF">
+              {downloadingPDF ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+              <span className="whitespace-nowrap">{downloadingPDF ? 'Preparing PDF…' : 'Download PDF'}</span>
             </button>
             <button onClick={() => setShowDeleteModal(true)}
               className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-950/30 hover:bg-red-950/60 text-red-400 border border-red-900/40 text-xs font-medium transition">

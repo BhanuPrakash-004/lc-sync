@@ -9,7 +9,7 @@
  *  - Dark glassmorphism UI matching the LC Sync design system
  */
 
-import { useState, useCallback, useEffect } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import {
@@ -23,7 +23,6 @@ import {
   ListChecks,
   Sparkles,
   X,
-  ExternalLink,
   Code2,
   StickyNote,
   FileText,
@@ -34,279 +33,37 @@ import {
   Square,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import { fetchCustomTopics } from '../lib/api'
+import { groupPDFProblems, subtopicKey } from '../lib/pdfGroups'
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-const esc = (s = '') =>
-  String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-
-const DIFF_COLOR = { Easy: '#10b981', Medium: '#f59e0b', Hard: '#ef4444' }
-const DIFF_BG    = { Easy: '#d1fae5', Medium: '#fef9c3', Hard: '#fee2e2' }
-const DIFF_TEXT  = { Easy: '#065f46', Medium: '#92400e', Hard: '#991b1b' }
-
-// ---------------------------------------------------------------------------
-// Supabase fetchers
-// ---------------------------------------------------------------------------
-async function fetchTopicsWithSubtopics() {
-  const [topicsRes, subtopicsRes] = await Promise.all([
-    supabase.from('topics').select('name,sort_order').order('sort_order', { ascending: true }),
-    supabase.from('subtopics').select('topic_name,name,sort_order').order('sort_order', { ascending: true }),
-  ])
-  if (topicsRes.error) throw topicsRes.error
-
-  const subMap = {}
-  ;(subtopicsRes.data || []).forEach((s) => {
-    if (!subMap[s.topic_name]) subMap[s.topic_name] = []
-    subMap[s.topic_name].push(s.name)
-  })
-
-  return (topicsRes.data || []).map((t) => ({
-    name: t.name,
-    sort_order: t.sort_order,
-    subtopics: subMap[t.name] || [],
-  }))
-}
+const EMPTY = []
+const DIFF_BG = { Easy: '#d1fae5', Medium: '#fef9c3', Hard: '#fee2e2' }
+const DIFF_TEXT = { Easy: '#065f46', Medium: '#92400e', Hard: '#991b1b' }
 
 async function fetchAllProblems() {
-  const { data, error } = await supabase
-    .from('submissions')
-    .select(
-      'id,problem_id,problem_title,difficulty,language,user_topic,subtopic,tags,runtime,memory,url,created_at'
-    )
-    .eq('is_accepted', true)
-    .order('problem_id', { ascending: true })
-  if (error) throw error
-  return data || []
+  const problems = []
+  let lastId
+  while (true) {
+    let query = supabase
+      .from('submissions')
+      .select('id,problem_id,problem_title,difficulty,user_topic,user_subtopic,subtopic,tags')
+      .eq('is_accepted', true)
+      .order('id', { ascending: true })
+      .limit(500)
+    if (lastId) query = query.gt('id', lastId)
+    const { data, error } = await query
+    if (error) throw error
+    if (!data?.length) break
+    problems.push(...data)
+    lastId = data.at(-1).id
+  }
+  return problems.sort((a, b) => a.problem_id - b.problem_id || a.problem_title.localeCompare(b.problem_title))
 }
 
 async function fetchFullSubmissions(ids) {
-  const { data, error } = await supabase
-    .from('submissions')
-    .select('*')
-    .in('id', ids)
-    .order('problem_id', { ascending: true })
+  const { data, error } = await supabase.from('submissions').select('*').in('id', ids)
   if (error) throw error
   return data || []
-}
-
-// ---------------------------------------------------------------------------
-// PDF HTML generator
-// ---------------------------------------------------------------------------
-function renderPDFDescription(description) {
-  if (!description || !description.trim()) return ''
-  const isHtml = /<[a-z][\s\S]*>/i.test(description) || description.trimStart().startsWith('<')
-  if (isHtml) {
-    const processed = description.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
-      if (!/referrerpolicy/i.test(attrs)) {
-        return `<img${attrs} referrerpolicy="no-referrer">`
-      }
-      return match
-    })
-    return `<div class="description"><strong>📝 Description</strong><div class="desc-content">${processed}</div></div>`
-  }
-  return `<div class="description"><strong>📝 Description</strong><div class="desc-content"><pre style="white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.6;margin:0;">${esc(description)}</pre></div></div>`
-}
-
-function renderPDFBlocks(blocks) {
-  if (!Array.isArray(blocks) || blocks.length === 0) return ''
-  return blocks
-    .map((b) => {
-      if (!b) return ''
-      const content = b.content || ''
-      if (b.type === 'h1') return `<h3 style="font-size:15px;font-weight:700;margin:12px 0 4px;color:#111;">${esc(content)}</h3>`
-      if (b.type === 'h2') return `<h4 style="font-size:14px;font-weight:700;margin:10px 0 4px;color:#111;">${esc(content)}</h4>`
-      if (b.type === 'h3') return `<h5 style="font-size:13px;font-weight:600;margin:8px 0 4px;color:#374151;">${esc(content)}</h5>`
-      if (b.type === 'text') return content ? `<p style="margin:4px 0;line-height:1.6;color:#374151;white-space:pre-wrap;">${esc(content)}</p>` : ''
-      if (b.type === 'bullet') return `<div style="margin:3px 0;padding-left:12px;color:#374151;">• ${esc(content)}</div>`
-      if (b.type === 'todo')
-        return `<div style="margin:3px 0;color:#374151;">${b.checked ? '☑' : '☐'} <span style="${b.checked ? 'text-decoration:line-through;color:#9ca3af;' : ''}">${esc(content)}</span></div>`
-      if (b.type === 'code')
-        return `<div class="code-block" style="margin:8px 0;"><div class="code-label">${esc((b.language || 'code').toUpperCase())}</div><pre><code class="language-${esc((b.language||'plaintext').toLowerCase())}">${esc(content)}</code></pre></div>`
-      if (b.type === 'image') {
-        if (!content) return ''
-        return `
-          <div style="margin:12px 0;text-align:center;page-break-inside:avoid;">
-            <img src="${esc(content)}" alt="${esc(b.caption || 'Image')}" referrerpolicy="no-referrer" crossorigin="anonymous" style="max-width:100%;max-height:380px;object-fit:contain;border-radius:6px;border:1px solid #374151;box-shadow:0 1px 3px rgba(0,0,0,0.2);display:inline-block;" />
-            ${b.caption ? `<div style="font-size:11px;color:#9ca3af;font-style:italic;margin-top:3px;">${esc(b.caption)}</div>` : ''}
-          </div>`
-      }
-      if (b.type === 'link') {
-        return `<div style="margin:4px 0;"><a href="${esc(b.url || '#')}" style="color:#c2410c;text-decoration:none;font-weight:600;font-size:11px;">🔗 ${esc(b.title || b.url)}</a></div>`
-      }
-      if (b.type === 'chatgpt') {
-        return `<div style="margin:4px 0;"><a href="${esc(b.url || '#')}" style="color:#059669;text-decoration:none;font-weight:600;font-size:11px;">💬 ${esc(b.title || 'ChatGPT Discussion')}</a></div>`
-      }
-      if (b.type === 'callout')
-        return `<div style="background:#fffbeb;border-left:3px solid #f59e0b;padding:6px 10px;margin:8px 0;border-radius:4px;color:#92400e;font-size:12px;">${esc(b.icon || '💡')} ${esc(content)}</div>`
-      if (b.type === 'divider') return '<hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0;" />'
-      return content ? `<p style="margin:4px 0;color:#374151;">${esc(content)}</p>` : ''
-    })
-    .filter(Boolean)
-    .join('\n')
-}
-
-function buildPDFHTML(submissions) {
-  const codeBlock = (label, code, lang) => `
-    <div class="code-block">
-      <div class="code-label">${esc(label)} <span class="lang">${esc(lang)}</span></div>
-      <pre><code class="language-${esc((lang||'plaintext').toLowerCase())}">${esc(code || '')}</code></pre>
-    </div>`
-
-  const linkRow = (icon, text, url) =>
-    url
-      ? `<a href="${esc(url)}" class="link-pill">
-           <span class="link-icon">${icon}</span>
-           ${esc(text)}
-         </a>`
-      : ''
-
-  const problemHtml = submissions.map((s, i) => {
-    const num = s.problem_id > 0 ? `LC #${s.problem_id} · ` : `${i + 1}. `
-    const alts = Array.isArray(s.alternate_codes) ? s.alternate_codes : []
-    const chatUrls  = Array.isArray(s.chatgpt_urls)  ? s.chatgpt_urls  : (s.chatgpt_url  ? [s.chatgpt_url]  : [])
-    const ytUrls    = Array.isArray(s.youtube_urls)  ? s.youtube_urls  : (s.youtube_url  ? [s.youtube_url]  : [])
-    const topic     = s.user_topic || (s.tags && s.tags[0]) || ''
-    const subtopic  = s.subtopic || ''
-
-    const descHtml = renderPDFDescription(s.description)
-
-    const primaryBlocks = renderPDFBlocks(s.page_blocks)
-    const primaryNotes  = s.notes ? `<p style="white-space:pre-wrap;margin:4px 0;">${esc(s.notes)}</p>` : ''
-    const notesHtml     = (primaryBlocks || primaryNotes)
-      ? `<div class="notes"><strong>🗒 Notes &amp; Highlights</strong>${primaryNotes}${primaryBlocks}</div>`
-      : ''
-
-    const altNotesHtml = alts
-      .map((a, j) => {
-        const aBlocks = renderPDFBlocks(a.page_blocks)
-        const aNotes  = a.notes ? `<p style="white-space:pre-wrap;margin:4px 0;">${esc(a.notes)}</p>` : ''
-        if (!aBlocks && !aNotes) return ''
-        return `<div class="alt-notes"><strong>💡 ${esc(a.label || `Approach ${j + 1}`)} Notes</strong>${aNotes}${aBlocks}</div>`
-      })
-      .filter(Boolean)
-      .join('')
-
-    const lcLinkHtml = s.url
-      ? `<a href="${esc(s.url)}" style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:600;background:#fff7ed;border:1px solid #fed7aa;color:#c2410c;text-decoration:none;flex-shrink:0;" title="Open on LeetCode">🔗 LeetCode</a>`
-      : ''
-
-    const linksHtml = (() => {
-      const pills = [
-        ...chatUrls.map((u, k) => linkRow('🤖', `ChatGPT${chatUrls.length > 1 ? ` ${k + 1}` : ''}`, u)),
-        ...ytUrls.map((u, k)   => linkRow('▶',  `YouTube${ytUrls.length > 1 ? ` ${k + 1}` : ''}`, u)),
-        ...alts.map((a, k) => a.chatgpt_url ? linkRow('🤖', `ChatGPT (${esc(a.label || `Alt ${k + 1}`)})`, a.chatgpt_url) : ''),
-        ...alts.map((a, k) => a.youtube_url ? linkRow('▶', `YouTube (${esc(a.label || `Alt ${k + 1}`)})`, a.youtube_url) : ''),
-      ].filter(Boolean)
-      return pills.length
-        ? `<div class="links-row">${pills.join('')}</div>`
-        : ''
-    })()
-
-    const metaRow = [
-      s.language && `<span class="meta-chip code">${esc(s.language)}</span>`,
-      s.runtime  && `<span class="meta-chip perf">⚡ ${esc(s.runtime)}</span>`,
-      s.memory   && `<span class="meta-chip perf">📦 ${esc(s.memory)}</span>`,
-      topic      && `<span class="meta-chip topic">${esc(topic)}${subtopic ? ' › ' + subtopic : ''}</span>`,
-    ].filter(Boolean).join('')
-
-    return `
-      <div class="problem">
-        <div class="problem-header">
-          <h2>${esc(num)}${esc(s.problem_title)}</h2>
-          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-            ${lcLinkHtml}
-            <span class="diff-badge" style="background:${DIFF_BG[s.difficulty]||'#f3f4f6'};color:${DIFF_TEXT[s.difficulty]||'#374151'}">${esc(s.difficulty||'')}</span>
-          </div>
-        </div>
-        <div class="meta-row">${metaRow}</div>
-        ${descHtml}
-        ${codeBlock('Primary Solution', s.code || '', s.language || '')}
-        ${alts.map((a, j) => codeBlock(a.label || `Alternate Approach ${j + 1}`, a.code || '', a.language || s.language || '')).join('')}
-        ${notesHtml}
-        ${altNotesHtml}
-        ${linksHtml}
-      </div>`
-  }).join('<hr/>')
-
-  const css = `
-    * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 28px 32px; color: #111; background: #fff; font-size: 13px; }
-    h1  { font-size: 22px; font-weight: 800; margin: 0 0 2px; color: #1a1a1a; }
-    .subtitle { color: #6b7280; font-size: 12px; margin-bottom: 36px; }
-    .toc { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 36px; page-break-inside: avoid; }
-    .toc h3 { margin: 0 0 10px; font-size: 13px; color: #374151; }
-    .toc ol  { margin: 0; padding-left: 18px; columns: 2; column-gap: 24px; }
-    .toc li  { font-size: 11px; color: #4b5563; margin-bottom: 3px; break-inside: avoid; }
-    .problem { margin-bottom: 36px; page-break-inside: avoid; }
-    .problem-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
-    h2 { font-size: 15px; font-weight: 700; margin: 0; color: #111; flex: 1; }
-    .diff-badge { display: inline-block; padding: 2px 9px; border-radius: 4px; font-size: 10px; font-weight: 700; flex-shrink: 0; }
-    .meta-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
-    .meta-chip { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 600; }
-    .meta-chip.code  { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
-    .meta-chip.perf  { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; }
-    .meta-chip.topic { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
-    .description { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; page-break-inside: avoid; }
-    .description strong { color: #1e293b; font-size: 12px; display: block; margin-bottom: 6px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
-    .desc-content { color: #374151; line-height: 1.6; font-size: 12.5px; }
-    .desc-content p { margin: 6px 0; }
-    .desc-content pre { background: #f1f5f9; padding: 10px 12px; border-radius: 6px; font-family: monospace; font-size: 11.5px; white-space: pre-wrap; overflow-x: auto; color: #0f172a; border: 1px solid #cbd5e1; }
-    .desc-content code { background: #f1f5f9; padding: 2px 4px; border-radius: 3px; font-family: monospace; font-size: 11.5px; color: #ea580c; }
-    .desc-content img { max-width: 100%; height: auto; border-radius: 4px; margin: 8px 0; display: block; }
-    .desc-content table { border-collapse: collapse; width: 100%; margin: 10px 0; }
-    .desc-content th, .desc-content td { border: 1px solid #cbd5e1; padding: 5px 8px; font-size: 11.5px; text-align: left; }
-    .desc-content th { background: #f1f5f9; font-weight: 600; }
-    .desc-content ul, .desc-content ol { padding-left: 18px; margin: 6px 0; }
-    .notes { background: #fffbeb; border-left: 3px solid #f59e0b; border-radius: 6px; padding: 12px 14px; margin-top: 12px; }
-    .notes strong { color: #92400e; font-size: 12px; display: block; margin-bottom: 6px; }
-    .alt-notes { background: #eff6ff; border-left: 3px solid #3b82f6; border-radius: 6px; padding: 12px 14px; margin-top: 10px; }
-    .alt-notes strong { color: #1e40af; font-size: 12px; display: block; margin-bottom: 6px; }
-    .code-block { margin: 12px 0; border: 1px solid #374151; border-radius: 6px; overflow: hidden; background: #1e1e2e; }
-    .code-label { font-weight: 700; font-size: 11px; background: #2d2d3f; color: #f97316; padding: 6px 12px; border-bottom: 1px solid #374151; display: flex; align-items: center; justify-content: space-between; }
-    .lang { font-weight: 400; color: #9ca3af; font-size: 10px; }
-    pre  { background: #1e1e2e; padding: 12px 14px; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; margin: 0; color: #f8fafc; font-family: 'Cascadia Code','Fira Code','Consolas',monospace; }
-    code { font-family: inherit; }
-    .links-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-    .link-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 20px; font-size: 10px; font-weight: 600; background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155; text-decoration: none; }
-    .link-pill:hover { background: #e2e8f0; }
-    .link-icon { font-size: 11px; }
-    hr  { border: none; border-top: 1px solid #e5e7eb; margin: 32px 0; }
-    @page { margin: 20mm 18mm; }
-    @media print { .problem { page-break-inside: avoid; } pre { max-height: none !important; } }
-  `
-
-  const tocItems = submissions
-    .map((s, i) => `<li>${i + 1}. ${esc(s.problem_title)}${s.problem_id > 0 ? ` (LC #${s.problem_id})` : ''}</li>`)
-    .join('')
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>LC Sync — PDF Export</title>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
-  <style>${css}</style>
-</head>
-<body>
-  <h1>LC Sync — Solutions PDF</h1>
-  <div class="subtitle">
-    Generated ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
-    &nbsp;·&nbsp; ${submissions.length} problem${submissions.length !== 1 ? 's' : ''}
-  </div>
-
-  ${submissions.length > 3 ? `<div class="toc"><h3>📋 Table of Contents</h3><ol>${tocItems}</ol></div>` : ''}
-
-  ${problemHtml}
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"><\/script>
-  <script>document.addEventListener('DOMContentLoaded', function() { hljs.highlightAll(); });<\/script>
-</body>
-</html>`
 }
 
 // ---------------------------------------------------------------------------
@@ -370,9 +127,9 @@ function ProblemCheckItem({ sub, checked, onToggle }) {
           )}
           {sub.problem_title}
         </p>
-        {(sub.user_topic || sub.subtopic) && (
+        {(sub.user_topic || sub.subtopic || sub.user_subtopic) && (
           <p className="text-[10px] text-zinc-600 mt-0.5 truncate">
-            {sub.user_topic}{sub.subtopic ? ` › ${sub.subtopic}` : ''}
+            {[sub.user_topic, sub.subtopic || sub.user_subtopic].filter(Boolean).join(' › ')}
           </p>
         )}
       </div>
@@ -392,7 +149,7 @@ function ProblemCheckItem({ sub, checked, onToggle }) {
 export default function DownloadPDF() {
   const [mode, setMode] = useState(null) // 'all' | 'topic' | 'subtopic' | 'selected'
   const [selectedTopics, setSelectedTopics]   = useState([])   // topic names
-  const [selectedSubtopics, setSelectedSubtopics] = useState([]) // "TopicName|||SubtopicName"
+  const [selectedSubtopics, setSelectedSubtopics] = useState([])
   const [selectedIds, setSelectedIds]         = useState(new Set())
   const [generating, setGenerating]           = useState(false)
   const [progress, setProgress]               = useState('')
@@ -400,13 +157,13 @@ export default function DownloadPDF() {
   const [expandedTopics, setExpandedTopics]   = useState({})
 
   // Data queries
-  const { data: topics = [], isLoading: topicsLoading } = useQuery({
+  const { data: topics = EMPTY, isLoading: topicsLoading, isError: topicsError } = useQuery({
     queryKey: ['pdf-topics'],
-    queryFn: fetchTopicsWithSubtopics,
+    queryFn: fetchCustomTopics,
     staleTime: 1000 * 60 * 5,
   })
 
-  const { data: allProblems = [], isLoading: problemsLoading } = useQuery({
+  const { data: allProblems = EMPTY, isLoading: problemsLoading, isError: problemsError } = useQuery({
     queryKey: ['pdf-problems'],
     queryFn: fetchAllProblems,
     staleTime: 1000 * 60 * 5,
@@ -414,47 +171,38 @@ export default function DownloadPDF() {
 
   const isLoading = topicsLoading || problemsLoading
 
-  // Derived: problems grouped
-  const problemsByTopic = {}
-  allProblems.forEach((p) => {
-    const t = p.user_topic || (p.tags && p.tags[0]) || 'Uncategorized'
-    if (!problemsByTopic[t]) problemsByTopic[t] = {}
-    const sub = p.subtopic || 'General'
-    if (!problemsByTopic[t][sub]) problemsByTopic[t][sub] = []
-    problemsByTopic[t][sub].push(p)
-  })
+  const groups = useMemo(() => groupPDFProblems(allProblems, topics), [allProblems, topics])
+  const allTopicsSelected = groups.length > 0 && groups.every((topic) => selectedTopics.includes(topic.name))
 
   // Filtered problems for 'selected' mode
+  const q = searchQ.toLowerCase()
   const filteredProblems = allProblems.filter((p) => {
-    if (!searchQ) return true
-    const q = searchQ.toLowerCase()
+    if (!q) return true
     return (
       p.problem_title.toLowerCase().includes(q) ||
       String(p.problem_id).includes(q) ||
       (p.user_topic || '').toLowerCase().includes(q) ||
-      (p.subtopic || '').toLowerCase().includes(q)
+      (p.subtopic || p.user_subtopic || '').toLowerCase().includes(q)
     )
   })
 
-  // Preview count
-  const previewCount = (() => {
-    if (mode === 'all') return allProblems.length
-    if (mode === 'topic') {
-      return allProblems.filter((p) => {
-        const t = p.user_topic || (p.tags && p.tags[0]) || 'Uncategorized'
-        return selectedTopics.includes(t)
-      }).length
-    }
-    if (mode === 'subtopic') {
-      return allProblems.filter((p) => {
-        const t = p.user_topic || (p.tags && p.tags[0]) || 'Uncategorized'
-        const s = p.subtopic || 'General'
-        return selectedSubtopics.includes(`${t}|||${s}`)
-      }).length
-    }
-    if (mode === 'selected') return selectedIds.size
-    return 0
-  })()
+  const selectedGroups = useMemo(() => {
+    if (!mode) return EMPTY
+    if (mode === 'all') return groups
+    if (mode === 'topic') return groups.filter((topic) => selectedTopics.includes(topic.name))
+    return groups.flatMap((topic) => {
+      const subtopics = mode === 'subtopic'
+        ? topic.subtopics.filter((section) => selectedSubtopics.includes(subtopicKey(topic.name, section.name)))
+        : topic.subtopics
+            .map((section) => ({ ...section, problems: section.problems.filter((problem) => selectedIds.has(problem.id)) }))
+            .filter((section) => section.problems.length > 0)
+      return subtopics.length ? [{ ...topic, subtopics }] : []
+    })
+  }, [mode, groups, selectedTopics, selectedSubtopics, selectedIds])
+  const exportProblems = useMemo(() => selectedGroups.flatMap((topic) =>
+    topic.subtopics.flatMap((section) => section.problems)
+  ), [selectedGroups])
+  const previewCount = exportProblems.length
 
   // Toggle helpers
   const toggleTopic = (name) =>
@@ -487,72 +235,43 @@ export default function DownloadPDF() {
     setExpandedTopics((prev) => ({ ...prev, [name]: !prev[name] }))
 
   // ── Generate PDF ──────────────────────────────────────────────────────────
-  const handleGenerate = useCallback(async () => {
-    if (!mode) { toast.error('Please select an export mode first.'); return }
-
-    let targetIds = []
-
-    if (mode === 'all') {
-      targetIds = allProblems.map((p) => p.id)
-    } else if (mode === 'topic') {
-      if (selectedTopics.length === 0) { toast.error('Please select at least one topic.'); return }
-      targetIds = allProblems
-        .filter((p) => {
-          const t = p.user_topic || (p.tags && p.tags[0]) || 'Uncategorized'
-          return selectedTopics.includes(t)
-        })
-        .map((p) => p.id)
-    } else if (mode === 'subtopic') {
-      if (selectedSubtopics.length === 0) { toast.error('Please select at least one subtopic.'); return }
-      targetIds = allProblems
-        .filter((p) => {
-          const t = p.user_topic || (p.tags && p.tags[0]) || 'Uncategorized'
-          const s = p.subtopic || 'General'
-          return selectedSubtopics.includes(`${t}|||${s}`)
-        })
-        .map((p) => p.id)
-    } else if (mode === 'selected') {
-      if (selectedIds.size === 0) { toast.error('Please select at least one problem.'); return }
-      targetIds = Array.from(selectedIds)
-    }
-
-    if (targetIds.length === 0) {
-      toast.error('No problems match your selection. Please add problems to the topics first.')
-      return
-    }
-
+  const handleGenerate = async () => {
+    if (generating || !previewCount) return
     setGenerating(true)
     try {
-      setProgress(`Fetching ${targetIds.length} problem${targetIds.length !== 1 ? 's' : ''}…`)
+      setProgress(`Loading 0 / ${previewCount}…`)
+      const targetIds = exportProblems.map((problem) => problem.id)
+      const fullById = new Map()
       const CHUNK = 50
-      let full = []
-      for (let i = 0; i < targetIds.length; i += CHUNK) {
-        const chunk = targetIds.slice(i, i + CHUNK)
-        setProgress(`Loading ${Math.min(i + CHUNK, targetIds.length)} / ${targetIds.length}…`)
-        const rows = await fetchFullSubmissions(chunk)
-        full = [...full, ...rows]
-      }
+      const [{ downloadPDF }] = await Promise.all([
+        import('../lib/pdfExport'),
+        (async () => {
+          for (let i = 0; i < targetIds.length; i += CHUNK) {
+            const rows = await fetchFullSubmissions(targetIds.slice(i, i + CHUNK))
+            for (const row of rows) fullById.set(row.id, row)
+            setProgress(`Loading ${fullById.size} / ${previewCount}…`)
+          }
+        })(),
+      ])
+      if (fullById.size !== previewCount) throw new Error('Some selected submissions are no longer available.')
 
-      // Sort by problem_id
-      full.sort((a, b) => (a.problem_id || 0) - (b.problem_id || 0))
-
-      setProgress('Building PDF…')
-      const html = buildPDFHTML(full)
-
-      const win = window.open('', '_blank')
-      if (!win) { toast.error('Please allow pop-ups for this site.'); return }
-      win.document.write(html)
-      win.document.close()
-      win.focus()
-      setTimeout(() => win.print(), 800)
-      toast.success(`PDF ready! ${full.length} problem${full.length !== 1 ? 's' : ''} loaded.`)
+      const book = selectedGroups.map((topic) => ({
+        ...topic,
+        subtopics: topic.subtopics.map((section) => ({
+          ...section,
+          problems: section.problems.map(({ id }) => fullById.get(id)),
+        })),
+      }))
+      const missing = await downloadPDF(book, { onProgress: setProgress })
+      if (missing) toast(`Download started. ${missing} ${missing === 1 ? 'image was' : 'images were'} unavailable.`)
+      else toast.success('PDF download started.')
     } catch (err) {
       toast.error(`PDF generation failed: ${err?.message || 'Unknown error'}`)
     } finally {
       setGenerating(false)
       setProgress('')
     }
-  }, [mode, allProblems, selectedTopics, selectedSubtopics, selectedIds])
+  }
 
   // ---------------------------------------------------------------------------
   // Render
@@ -571,7 +290,7 @@ export default function DownloadPDF() {
               <h1 className="text-3xl font-bold text-white tracking-tight">Download PDF</h1>
             </div>
             <p className="text-zinc-400 text-sm ml-14">
-              Generate a beautiful, print-ready PDF with code, notes, descriptions &amp; links.
+              Export a study guide organized by topic and subtopic, with solutions, notes, and illustrations.
             </p>
           </div>
           {previewCount > 0 && (
@@ -587,6 +306,10 @@ export default function DownloadPDF() {
             <Loader2 className="w-5 h-5 animate-spin text-orange-400" />
             <span className="text-sm">Loading your problems…</span>
           </div>
+        ) : topicsError || problemsError ? (
+          <p role="alert" className="rounded-2xl border border-zinc-800/60 bg-zinc-900/40 p-6 text-zinc-300">
+            Could not load the export data. Refresh the page to try again.
+          </p>
         ) : allProblems.length === 0 ? (
           <div className="rounded-2xl border border-zinc-800/60 bg-zinc-900/40 p-12 text-center">
             <AlertCircle className="w-10 h-10 text-zinc-600 mx-auto mb-3" />
@@ -622,17 +345,34 @@ export default function DownloadPDF() {
                   active={mode === 'topic'}
                   onClick={() => setMode('topic')}
                 >
-                  {/* Topic selector */}
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTopics(groups.map((topic) => topic.name))}
+                      disabled={allTopicsSelected}
+                      className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-orange-300 bg-orange-500/15 hover:bg-orange-500/25 disabled:opacity-50"
+                    >
+                      Select all topics
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTopics([])}
+                      disabled={selectedTopics.length === 0}
+                      className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50"
+                    >
+                      Clear topics
+                    </button>
+                  </div>
                   <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1 scrollbar-thin">
-                    {topics.map((t) => {
-                      const cnt = (problemsByTopic[t.name] &&
-                        Object.values(problemsByTopic[t.name]).flat().length) || 0
+                    {groups.map((t) => {
                       const isSelected = selectedTopics.includes(t.name)
                       return (
-                        <div
+                        <button
+                          type="button"
                           key={t.name}
+                          aria-pressed={isSelected}
                           onClick={() => toggleTopic(t.name)}
-                          className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-all ${
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-all ${
                             isSelected
                               ? 'bg-orange-500/15 border border-orange-500/30'
                               : 'hover:bg-zinc-800/60 border border-transparent'
@@ -644,8 +384,8 @@ export default function DownloadPDF() {
                             </div>
                             <span className={`text-sm truncate ${isSelected ? 'text-white font-medium' : 'text-zinc-300'}`}>{t.name}</span>
                           </div>
-                          <span className="text-[10px] text-zinc-600 ml-2 flex-shrink-0">{cnt}</span>
-                        </div>
+                          <span className="text-[10px] text-zinc-600 ml-2 flex-shrink-0">{t.count}</span>
+                        </button>
                       )
                     })}
                   </div>
@@ -661,15 +401,15 @@ export default function DownloadPDF() {
                   onClick={() => setMode('subtopic')}
                 >
                   <div className="space-y-2 max-h-64 overflow-y-auto pr-1 scrollbar-thin">
-                    {topics.filter((t) => t.subtopics.length > 0).map((t) => {
+                    {groups.map((t) => {
                       const hasExpanded = expandedTopics[t.name]
-                      const topicSubs = (problemsByTopic[t.name] && Object.keys(problemsByTopic[t.name])) || []
-                      const allSubs = Array.from(new Set([...t.subtopics, ...topicSubs]))
-                      const anySelected = allSubs.some((s) => selectedSubtopics.includes(`${t.name}|||${s}`))
+                      const anySelected = t.subtopics.some(({ name }) => selectedSubtopics.includes(subtopicKey(t.name, name)))
 
                       return (
                         <div key={t.name}>
                           <button
+                            type="button"
+                            aria-expanded={Boolean(hasExpanded)}
                             onClick={() => toggleExpandTopic(t.name)}
                             className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-zinc-800/60 transition text-left ${anySelected ? 'text-blue-300' : 'text-zinc-400'}`}
                           >
@@ -678,15 +418,16 @@ export default function DownloadPDF() {
                           </button>
                           {hasExpanded && (
                             <div className="ml-3 mt-1 space-y-1">
-                              {allSubs.map((s) => {
-                                const key = `${t.name}|||${s}`
+                              {t.subtopics.map((section) => {
+                                const key = subtopicKey(t.name, section.name)
                                 const isSel = selectedSubtopics.includes(key)
-                                const cnt = (problemsByTopic[t.name]?.[s] || []).length
                                 return (
-                                  <div
+                                  <button
+                                    type="button"
                                     key={key}
+                                    aria-pressed={isSel}
                                     onClick={() => toggleSubtopic(key)}
-                                    className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-all ${
+                                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-all ${
                                       isSel
                                         ? 'bg-blue-500/15 border border-blue-500/30'
                                         : 'hover:bg-zinc-800/60 border border-transparent'
@@ -696,10 +437,10 @@ export default function DownloadPDF() {
                                       <div className={`flex-shrink-0 ${isSel ? 'text-blue-400' : 'text-zinc-600'}`}>
                                         {isSel ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded border border-zinc-700" />}
                                       </div>
-                                      <span className={`text-xs truncate ${isSel ? 'text-white font-medium' : 'text-zinc-300'}`}>{s}</span>
+                                      <span className={`text-xs truncate ${isSel ? 'text-white font-medium' : 'text-zinc-300'}`}>{section.name}</span>
                                     </div>
-                                    {cnt > 0 && <span className="text-[10px] text-zinc-600 ml-2 flex-shrink-0">{cnt}</span>}
-                                  </div>
+                                    <span className="text-[10px] text-zinc-600 ml-2 flex-shrink-0">{section.problems.length}</span>
+                                  </button>
                                 )
                               })}
                             </div>
@@ -787,12 +528,12 @@ export default function DownloadPDF() {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                 {[
-                  { icon: FileText,    label: 'Problem Description', color: 'text-emerald-400 bg-emerald-500/10' },
+                  { icon: FileText,    label: 'Descriptions & Illustrations', color: 'text-emerald-400 bg-emerald-500/10' },
                   { icon: Code2,       label: 'Primary Solution Code', color: 'text-orange-400 bg-orange-500/10' },
                   { icon: Layers,      label: 'All Alternate Approaches', color: 'text-blue-400 bg-blue-500/10' },
                   { icon: StickyNote,  label: 'Notes (Main + Per-Approach)', color: 'text-yellow-400 bg-yellow-500/10' },
                   { icon: Link2,       label: 'LeetCode / ChatGPT / YouTube Links', color: 'text-violet-400 bg-violet-500/10' },
-                  { icon: ListChecks,  label: 'Table of Contents', color: 'text-zinc-400 bg-zinc-700/50' },
+                  { icon: ListChecks,  label: 'Table of Contents & Page Numbers', color: 'text-zinc-400 bg-zinc-700/50' },
                 ].map(({ icon: Icon, label, color }) => (
                   <div key={label} className="flex items-center gap-2.5 p-3 rounded-xl bg-zinc-800/30 border border-zinc-800/60">
                     <div className={`flex-shrink-0 p-1.5 rounded-lg ${color}`}>
@@ -809,7 +550,7 @@ export default function DownloadPDF() {
               <div className="flex items-center gap-2">
                 <span className="flex items-center justify-center w-6 h-6 rounded-full bg-orange-500/15 border border-orange-500/30 text-orange-400 text-xs font-bold">3</span>
                 <div>
-                  <h2 className="text-base font-semibold text-white">Generate PDF</h2>
+                  <h2 className="text-base font-semibold text-white">Download Study Guide</h2>
                   {previewCount > 0 ? (
                     <p className="text-zinc-400 text-xs mt-0.5">
                       <span className="text-orange-400 font-semibold">{previewCount}</span> problem{previewCount !== 1 ? 's' : ''} will be exported
@@ -823,6 +564,8 @@ export default function DownloadPDF() {
               <button
                 onClick={handleGenerate}
                 disabled={generating || !mode || previewCount === 0}
+                aria-label="Download PDF"
+                aria-busy={generating}
                 className={`
                   flex items-center gap-2.5 px-6 py-3 rounded-xl font-semibold text-sm transition-all duration-200
                   ${generating || !mode || previewCount === 0
@@ -839,7 +582,7 @@ export default function DownloadPDF() {
                 ) : (
                   <>
                     <FileDown className="w-4 h-4" />
-                    <span>Generate &amp; Print PDF</span>
+                    <span>Download PDF</span>
                     {previewCount > 0 && (
                       <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white/20 text-[10px] font-bold">
                         {previewCount > 99 ? '99+' : previewCount}
@@ -850,13 +593,6 @@ export default function DownloadPDF() {
               </button>
             </div>
 
-            {/* ── Tip ─────────────────────────────────────────────────────── */}
-            <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl bg-zinc-900/40 border border-zinc-800/40">
-              <ExternalLink className="w-3.5 h-3.5 text-zinc-600 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-zinc-500 leading-relaxed">
-                A print dialog will open in a new tab. Use <strong className="text-zinc-400">Save as PDF</strong> in the destination dropdown, set margins to <strong className="text-zinc-400">Minimum</strong>, and enable <strong className="text-zinc-400">Background graphics</strong> for best results.
-              </p>
-            </div>
           </>
         )}
       </div>

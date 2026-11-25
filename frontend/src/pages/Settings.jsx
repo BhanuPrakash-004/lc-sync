@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
 import { useAuth } from '../lib/AuthContext'
 import {
@@ -21,6 +22,7 @@ import {
   GitBranch,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import { exportAllData, clearAllData } from '../lib/api'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,6 +163,7 @@ export default function Settings() {
   const [connTesting, setConnTesting] = useState(false)
   const [connError, setConnError] = useState('')
 
+  const queryClient = useQueryClient()
   const [exporting, setExporting] = useState(false)
   const [showClearModal, setShowClearModal] = useState(false)
   const [clearing, setClearing] = useState(false)
@@ -188,8 +191,7 @@ export default function Settings() {
   const handleExport = useCallback(async () => {
     setExporting(true)
     try {
-      const { data, error } = await supabase.from('submissions').select('*')
-      if (error) throw error
+      const data = await exportAllData()
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -209,16 +211,23 @@ export default function Settings() {
   const handleClearAll = useCallback(async () => {
     setClearing(true)
     try {
-      const { error } = await supabase.from('submissions').delete().neq('id', '00000000-0000-0000-0000-000000000000')
-      if (error) throw error
-      toast.success('All data cleared.')
+      const { imagesDeleted, imageError } = await clearAllData()
+      if (imageError) {
+        toast.error(`Submissions cleared, but images could not be deleted: ${imageError.message || 'Unknown error'}`)
+      } else {
+        toast.success(imagesDeleted
+          ? `All data cleared, including ${imagesDeleted} image${imagesDeleted === 1 ? '' : 's'}.`
+          : 'All data cleared.')
+      }
       setShowClearModal(false)
+      // Don't let other pages show cached copies of the deleted submissions.
+      queryClient.invalidateQueries()
     } catch (err) {
       toast.error(`Clear failed: ${err?.message || 'Unknown error'}`)
     } finally {
       setClearing(false)
     }
-  }, [])
+  }, [queryClient])
 
   const envTemplate = `VITE_SUPABASE_URL=https://your-project-id.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key-here`
@@ -388,7 +397,7 @@ VITE_SUPABASE_ANON_KEY=your-anon-key-here`
 
             <p className="text-xs text-zinc-500 flex items-start gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-yellow-600" />
-              Clearing data permanently deletes all synced submissions from your database. Export first!
+              Clearing data permanently deletes all synced submissions and their uploaded images. Export first! The export keeps image links, not the image files.
             </p>
           </div>
         </SettingsCard>
@@ -468,7 +477,7 @@ VITE_SUPABASE_ANON_KEY=your-anon-key-here`
       {showClearModal && (
         <DangerModal
           title="Clear All Data"
-          description="This will permanently delete ALL synced submissions from your Supabase database. This action cannot be undone. Please export your data first."
+          description="This will permanently delete ALL synced submissions and their uploaded images from your Supabase project. This action cannot be undone. Please export your data first (the export keeps image links, not the image files)."
           confirmLabel="Clear All Data"
           isLoading={clearing}
           onConfirm={handleClearAll}

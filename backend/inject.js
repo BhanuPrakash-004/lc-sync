@@ -4,6 +4,10 @@
   // Run and Submit share the check endpoint. Only a check for an ID returned
   // by a new Submit request is eligible to open the save modal.
   let activeSubmission = null;
+  // While a submission is tracked, every GraphQL response on the page is
+  // inspected. Judging takes seconds; stop tracking a submission that has
+  // had no final verdict for this long.
+  const TRACKING_LIMIT_MS = 5 * 60 * 1000;
   function trace(step, event, details = {}) {
     console.info(`[LC Sync][STEP ${step}] ${event} ${JSON.stringify(details)}`);
   }
@@ -55,9 +59,22 @@
     }
   }
 
+  function stopTracking(reason) {
+    trace(6, `STOP: ${reason}; tracking ended`, { id: activeSubmission.id });
+    // Release detection steps still waiting for this Submit's ID.
+    activeSubmission.resolveReady();
+    activeSubmission = null;
+  }
+
   function trackRequest(input, method, body) {
     const url = new URL(input, window.location.href);
     if (url.origin !== window.location.origin) return null;
+    if (
+      activeSubmission &&
+      Date.now() - activeSubmission.startedAt > TRACKING_LIMIT_MS
+    ) {
+      stopTracking("no final verdict within the time limit");
+    }
 
     const submit = url.pathname.match(/^\/problems\/([^/]+)\/submit\/?$/);
     if (method.toUpperCase() === "POST" && submit) {
@@ -65,6 +82,7 @@
       let resolveReady;
       const submission = {
         id: null,
+        startedAt: Date.now(),
         slug: submit[1],
         code: getEditorCode(),
         body: Promise.resolve(body)
@@ -239,6 +257,13 @@
       (data.status_msg != null && data.status_msg !== "Accepted") ||
       (data.status_code != null && String(data.status_code) !== "10")
     ) {
+      // A completed REST check is the final verdict, so a failure ends
+      // tracking. GraphQL details can show an interim verdict (status 16
+      // with no tests) before the real one, so they keep tracking.
+      if (request.kind === "check" && data.state === "SUCCESS") {
+        stopTracking(`final verdict is not Accepted (${data.status_msg ?? data.status_code})`);
+        return;
+      }
       trace(
         6,
         "WAIT: no Accepted verdict; popup withheld, still tracking later updates",
@@ -346,6 +371,21 @@
     } catch (error) {
       if (request?.kind === "submit") request.submission.resolveReady();
       throw error;
+    }
+    if (request?.kind === "graphql") {
+      // Any GraphQL request on the page can arrive while a submission is
+      // tracked. Inspect a copy in the background instead of holding the
+      // page's response until detection finishes.
+      if (response.ok) {
+        response
+          .clone()
+          .json()
+          .then((data) => handleResponse(request, data))
+          .catch((error) =>
+            console.warn("[LC Sync] Response detection failed:", error.message),
+          );
+      }
+      return response;
     }
     if (request) {
       try {

@@ -52,17 +52,20 @@ function harness() {
     fetch: async () => nextResponse,
     postMessage: (message) => messages.push(message),
   };
+  const clock = { now: Date.now() };
   vm.runInNewContext(injectSource, {
     window, URL, TextDecoder, XMLHttpRequest: XHR, document: { querySelector: () => null },
+    Date: { now: () => clock.now },
     console: Object.fromEntries(['info', 'warn', 'log'].map(level => [level, (...args) => logs.push(args)])),
   });
   return {
-    window, messages, XHR, logs,
+    window, messages, XHR, logs, clock,
     async fetch(url, data, init = {}, status = 200) {
       nextResponse = new Response(JSON.stringify(data), { status });
       const expected = nextResponse;
       assert.equal(await window.fetch(url, init), expected, 'original response is preserved');
       assert.deepEqual(await expected.json(), JSON.parse(JSON.stringify(data)), 'original response body stays readable');
+      await new Promise(setImmediate); // GraphQL detection finishes in the background
     },
     async xhr(url, data, method = 'GET', body, status = 200, responseType = '') {
       const xhr = new XHR();
@@ -143,6 +146,55 @@ for (const transport of ['fetch', 'xhr']) {
     await submit(h, 124);
     await send(h, checkPath(), accepted);
     assert.equal(h.messages.length, 0);
+    await send(h, checkPath(124), accepted);
+    assert.equal(h.messages.length, 1);
+  });
+
+  const graphqlBody = (id = 123) => JSON.stringify({ operationName: 'submissionDetails', variables: { submissionId: id } });
+  const graphqlAccepted = (id = 123) => ({ data: { submissionDetails: { id, statusDisplay: 'Accepted' } } });
+  const inspectedGraphQL = (h) => h.logs.filter(args => args[0] === '[LC Sync] GraphQL response:').length;
+
+  test(transport + ': a final failed check ends tracking, so later GraphQL traffic is not inspected', async () => {
+    for (const verdict of [
+      { status_code: 11, status_msg: 'Wrong Answer' },
+      { status_code: 14, status_msg: 'Time Limit Exceeded' },
+      { status_code: 20, status_msg: 'Compile Error' },
+    ]) {
+      const h = harness();
+      await submit(h);
+      await send(h, checkPath(), { state: 'SUCCESS', ...verdict, total_correct: 1, total_testcases: 100 });
+      assert.match(h.logs.map(args => args.join(' ')).join('\n'), /STOP: final verdict is not Accepted.*tracking ended/);
+      await send(h, '/graphql/', graphqlAccepted(), 'POST', graphqlBody());
+      await send(h, checkPath(), accepted);
+      assert.equal(h.messages.length, 0);
+      assert.equal(inspectedGraphQL(h), 0, 'GraphQL responses are no longer read');
+      await submit(h, 124);
+      await send(h, checkPath(124), accepted);
+      assert.equal(h.messages.length, 1, 'the next Submit is tracked normally');
+    }
+  });
+
+  test(transport + ': a failed verdict without a completed state keeps tracking', async () => {
+    const h = harness();
+    await submit(h);
+    await send(h, checkPath(), { status_code: 11, status_msg: 'Wrong Answer' });
+    await send(h, checkPath(), accepted);
+    assert.equal(h.messages.length, 1);
+  });
+
+  test(transport + ': tracking stops when no final verdict arrives within the time limit', async () => {
+    const h = harness();
+    await submit(h);
+    h.clock.now += 5 * 60 * 1000;
+    await send(h, '/graphql/', { data: { submissionDetails: { id: 123, statusCode: 16 } } }, 'POST', graphqlBody());
+    assert.equal(inspectedGraphQL(h), 1, 'still tracked at exactly the limit');
+    h.clock.now += 1;
+    await send(h, '/graphql/', graphqlAccepted(), 'POST', graphqlBody());
+    await send(h, checkPath(), accepted);
+    assert.equal(h.messages.length, 0);
+    assert.equal(inspectedGraphQL(h), 1, 'expired submission is no longer inspected');
+    assert.match(h.logs.map(args => args.join(' ')).join('\n'), /STOP: no final verdict within the time limit/);
+    await submit(h, 124);
     await send(h, checkPath(124), accepted);
     assert.equal(h.messages.length, 1);
   });
@@ -366,6 +418,20 @@ test('an immediate first check started by a page XHR handler is not dropped', as
   submission.respond({ submission_id: 123 });
   await new Promise(setImmediate);
   assert.equal(h.messages.length, 1);
+});
+
+test('fetched GraphQL responses reach the page before the Submit ID is known', { timeout: 2000 }, async () => {
+  const h = harness();
+  const submission = new h.XHR();
+  submission.open('POST', submitPath);
+  submission.send(); // Submit sent; its response (and ID) has not arrived yet
+  // This used to wait for the Submit response before returning to the page.
+  await h.fetch('/graphql/', { data: { submissionDetails: { id: 123, statusDisplay: 'Accepted' } } },
+    { method: 'POST', body: JSON.stringify({ variables: { submissionId: 123 } }) });
+  assert.equal(h.messages.length, 0);
+  await submission.respond({ submission_id: 123 });
+  await new Promise(setImmediate);
+  assert.equal(h.messages.length, 1, 'detection still completes once the ID arrives');
 });
 
 test('loadend does not release a Submit ID before asynchronous Blob decoding finishes', async () => {

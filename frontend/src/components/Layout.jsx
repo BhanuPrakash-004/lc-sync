@@ -105,7 +105,7 @@ function GlobalSearch({ onClose }) {
     if (!q.trim()) { setResults([]); return }
     setLoading(true)
     try {
-      const { data } = await fetchSubmissions({ search: q, perPage: 8 })
+      const { data } = await fetchSubmissions({ search: q, perPage: 8, withCount: false })
       setResults(data || [])
     } catch {
       setResults([])

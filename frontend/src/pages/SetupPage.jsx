@@ -104,6 +104,8 @@ CREATE OR REPLACE TRIGGER trg_submissions_updated_at
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_submissions_problem_id    ON public.submissions (problem_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_problem_slug  ON public.submissions (problem_slug);
+CREATE INDEX IF NOT EXISTS idx_submissions_problem_title ON public.submissions (problem_title);
 CREATE INDEX IF NOT EXISTS idx_submissions_difficulty    ON public.submissions (difficulty);
 CREATE INDEX IF NOT EXISTS idx_submissions_language      ON public.submissions (language);
 CREATE INDEX IF NOT EXISTS idx_submissions_user_id       ON public.submissions (user_id);
@@ -114,8 +116,6 @@ CREATE INDEX IF NOT EXISTS idx_submissions_subtopic      ON public.submissions (
 CREATE INDEX IF NOT EXISTS idx_submissions_is_revised    ON public.submissions (is_revised);
 CREATE INDEX IF NOT EXISTS idx_submissions_quality       ON public.submissions (quality) WHERE quality IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_submissions_tags          ON public.submissions USING GIN (tags);
-CREATE INDEX IF NOT EXISTS idx_submissions_page_blocks   ON public.submissions USING GIN (page_blocks);
-CREATE INDEX IF NOT EXISTS idx_submissions_alt_codes     ON public.submissions USING GIN (alternate_codes);
 
 CREATE INDEX IF NOT EXISTS idx_topics_name               ON public.topics (name);
 CREATE INDEX IF NOT EXISTS idx_topics_sort_order         ON public.topics (sort_order);
